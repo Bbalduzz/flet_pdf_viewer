@@ -4,7 +4,7 @@ PDF Viewer - Minimal, elegant design with text selection.
 
 import flet as ft
 
-from pdf_viewer import PdfDocument, PdfViewer, PdfViewerMode
+from flet_pdf_viewer import PdfDocument, PdfViewer, ViewerMode
 
 COLORS = {
     "bg": "#000000",
@@ -239,13 +239,13 @@ def main(page: ft.Page):
     viewer = PdfViewer(
         source=document,
         scale=1.0,
-        mode=PdfViewerMode.CONTINUOUS,
+        mode=ViewerMode.CONTINUOUS,
         selection_color=COLORS["selection"],
         popup_builder=build_popup,
     )
 
     # State
-    current_mode = PdfViewerMode.CONTINUOUS
+    current_mode = ViewerMode.CONTINUOUS
     drawing_active = [False]  # Use list to allow mutation in nested functions
 
     # Page indicator
@@ -331,7 +331,7 @@ def main(page: ft.Page):
         )
 
     # Mode button (highlighted when active)
-    def mode_btn(icon, mode: PdfViewerMode, tooltip: str):
+    def mode_btn(icon, mode: ViewerMode, tooltip: str):
         is_active = current_mode == mode
 
         def on_click(e):
@@ -400,17 +400,17 @@ def main(page: ft.Page):
                     [
                         mode_btn(
                             ft.Icons.ARTICLE_OUTLINED,
-                            PdfViewerMode.SINGLE_PAGE,
+                            ViewerMode.SINGLE_PAGE,
                             "Single page",
                         ),
                         mode_btn(
                             ft.Icons.VIEW_AGENDA_OUTLINED,
-                            PdfViewerMode.CONTINUOUS,
+                            ViewerMode.CONTINUOUS,
                             "Continuous scroll",
                         ),
                         mode_btn(
                             ft.Icons.AUTO_STORIES_OUTLINED,
-                            PdfViewerMode.DOUBLE_PAGE,
+                            ViewerMode.DOUBLE_PAGE,
                             "Double page",
                         ),
                     ],
