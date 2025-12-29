@@ -12,7 +12,7 @@ import flet.canvas as cv
 import pymupdf
 
 from ..backends.base import PageBackend
-from ..types import AnnotationInfo, RenderResult, SelectableChar
+from ..types import AnnotationInfo, LinearGradient, RadialGradient, RenderResult, SelectableChar
 
 
 def _map_font_name(pdf_font: str) -> str:
@@ -70,7 +70,7 @@ class PageRenderer:
         return RenderResult(shapes=shapes, images=images, chars=chars)
 
     def _render_graphics(self, page: PageBackend, shapes: List[Any]) -> None:
-        """Render vector graphics."""
+        """Render vector graphics (rects, paths, lines, curves)."""
         for gfx in page.extract_graphics():
             x0, y0, x1, y1 = gfx.bbox
             cx0 = x0 * self.scale
@@ -81,33 +81,123 @@ class PageRenderer:
             height = cy1 - cy0
 
             if gfx.type == "rect" and width > 0 and height > 0:
-                if gfx.fill_color:
-                    shapes.append(
-                        cv.Rect(
-                            x=cx0,
-                            y=cy0,
-                            width=width,
-                            height=height,
-                            paint=ft.Paint(
-                                color=gfx.fill_color,
-                                style=ft.PaintingStyle.FILL,
-                            ),
-                        )
+                self._render_rect(gfx, cx0, cy0, width, height, shapes)
+
+            elif gfx.type == "path" and gfx.path_commands:
+                self._render_path(gfx, shapes)
+
+    def _render_rect(
+        self,
+        gfx: Any,
+        x: float,
+        y: float,
+        width: float,
+        height: float,
+        shapes: List[Any],
+    ) -> None:
+        """Render a rectangle."""
+        # Check for gradient fill first
+        if gfx.fill_gradient:
+            gradient_paint = self._create_gradient_paint(gfx.fill_gradient)
+            if gradient_paint:
+                gradient_paint.style = ft.PaintingStyle.FILL
+                shapes.append(
+                    cv.Rect(
+                        x=x,
+                        y=y,
+                        width=width,
+                        height=height,
+                        paint=gradient_paint,
                     )
-                if gfx.linewidth > 0 and gfx.stroke_color:
-                    shapes.append(
-                        cv.Rect(
-                            x=cx0,
-                            y=cy0,
-                            width=width,
-                            height=height,
-                            paint=ft.Paint(
-                                stroke_width=gfx.linewidth * self.scale,
-                                color=gfx.stroke_color,
-                                style=ft.PaintingStyle.STROKE,
-                            ),
-                        )
-                    )
+                )
+        elif gfx.fill_color:
+            shapes.append(
+                cv.Rect(
+                    x=x,
+                    y=y,
+                    width=width,
+                    height=height,
+                    paint=ft.Paint(
+                        color=gfx.fill_color,
+                        style=ft.PaintingStyle.FILL,
+                    ),
+                )
+            )
+        if gfx.linewidth > 0 and gfx.stroke_color:
+            stroke_paint = ft.Paint(
+                stroke_width=gfx.linewidth * self.scale,
+                color=gfx.stroke_color,
+                style=ft.PaintingStyle.STROKE,
+            )
+            # Apply dash pattern if present
+            if gfx.stroke_dashes:
+                stroke_paint.stroke_dash_pattern = [d * self.scale for d in gfx.stroke_dashes]
+            shapes.append(
+                cv.Rect(
+                    x=x,
+                    y=y,
+                    width=width,
+                    height=height,
+                    paint=stroke_paint,
+                )
+            )
+
+    def _render_path(self, gfx: Any, shapes: List[Any]) -> None:
+        """Render a path with lines and bezier curves."""
+        path_elements = []
+
+        for cmd in gfx.path_commands:
+            op = cmd[0]
+
+            if op == "m":  # MoveTo
+                x, y = cmd[1] * self.scale, cmd[2] * self.scale
+                path_elements.append(cv.Path.MoveTo(x, y))
+
+            elif op == "l":  # LineTo
+                x, y = cmd[1] * self.scale, cmd[2] * self.scale
+                path_elements.append(cv.Path.LineTo(x, y))
+
+            elif op == "c":  # Cubic bezier
+                x1, y1 = cmd[1] * self.scale, cmd[2] * self.scale
+                x2, y2 = cmd[3] * self.scale, cmd[4] * self.scale
+                x3, y3 = cmd[5] * self.scale, cmd[6] * self.scale
+                path_elements.append(cv.Path.CubicTo(x1, y1, x2, y2, x3, y3))
+
+            elif op == "h":  # Close path
+                path_elements.append(cv.Path.Close())
+
+        if not path_elements:
+            return
+
+        # Render fill first, then stroke
+        if gfx.fill_color:
+            shapes.append(
+                cv.Path(
+                    path_elements,
+                    paint=ft.Paint(
+                        color=gfx.fill_color,
+                        style=ft.PaintingStyle.FILL,
+                    ),
+                )
+            )
+
+        if gfx.stroke_color and gfx.linewidth > 0:
+            stroke_paint = ft.Paint(
+                color=gfx.stroke_color,
+                stroke_width=gfx.linewidth * self.scale,
+                style=ft.PaintingStyle.STROKE,
+                stroke_cap=ft.StrokeCap.ROUND,
+                stroke_join=ft.StrokeJoin.ROUND,
+            )
+            # Apply dash pattern if present
+            if gfx.stroke_dashes:
+                stroke_paint.stroke_dash_pattern = [d * self.scale for d in gfx.stroke_dashes]
+            shapes.append(
+                cv.Path(
+                    path_elements,
+                    paint=stroke_paint,
+                )
+            )
 
     def _render_images(
         self, page: PageBackend, images: List[Tuple[str, float, float, float, float]]
@@ -316,7 +406,6 @@ class PageRenderer:
 
             style = ft.TextStyle(
                 size=font_size,
-                color=block.color,
                 font_family=font_family,
             )
 
@@ -324,6 +413,16 @@ class PageRenderer:
                 style.weight = ft.FontWeight.BOLD
             if block.italic:
                 style.italic = True
+
+            # Apply gradient or solid color
+            if block.gradient:
+                gradient_paint = self._create_gradient_paint(block.gradient)
+                if gradient_paint:
+                    style.foreground = gradient_paint
+                else:
+                    style.color = block.color
+            else:
+                style.color = block.color
 
             shapes.append(
                 cv.Text(
@@ -333,6 +432,77 @@ class PageRenderer:
                     style=style,
                 )
             )
+
+    def _create_gradient_paint(
+        self, gradient: LinearGradient | RadialGradient
+    ) -> ft.Paint | None:
+        """Convert gradient definition to Flet Paint with gradient."""
+        try:
+            # Convert RGB tuples (0-1) to hex colors
+            colors = []
+            for c in gradient.colors:
+                r, g, b = int(c[0] * 255), int(c[1] * 255), int(c[2] * 255)
+                colors.append(f"#{r:02x}{g:02x}{b:02x}")
+
+            if isinstance(gradient, LinearGradient):
+                # Handle extend properties
+                # PDF allows asymmetric extension (extend before start but not after end)
+                begin_x = gradient.x0 * self.scale
+                begin_y = gradient.y0 * self.scale
+                end_x = gradient.x1 * self.scale
+                end_y = gradient.y1 * self.scale
+
+                # Calculate gradient vector
+                dx = end_x - begin_x
+                dy = end_y - begin_y
+
+                # If extend_start is True but extend_end is False, we need special handling
+                # Extend the start point far backwards to simulate infinite extension
+                if gradient.extend_start and not gradient.extend_end:
+                    # Extend start backwards by a large factor
+                    begin_x -= dx * 10
+                    begin_y -= dy * 10
+                    # Adjust color stops to compensate
+                    # Original gradient is now from 10/11 to 11/11
+                    colors_adjusted = [colors[0], colors[0], colors[1]]
+                    stops_adjusted = [0.0, 10.0 / 11.0, 1.0]
+                    return ft.Paint(
+                        gradient=ft.PaintLinearGradient(
+                            begin=(begin_x, begin_y),
+                            end=(end_x, end_y),
+                            colors=colors_adjusted,
+                            color_stops=stops_adjusted,
+                            tile_mode=ft.GradientTileMode.DECAL,
+                        ),
+                    )
+
+                # Determine tile mode for other cases
+                tile_mode = ft.GradientTileMode.CLAMP
+                if not gradient.extend_start and not gradient.extend_end:
+                    tile_mode = ft.GradientTileMode.DECAL
+
+                return ft.Paint(
+                    gradient=ft.PaintLinearGradient(
+                        begin=(begin_x, begin_y),
+                        end=(end_x, end_y),
+                        colors=colors,
+                        color_stops=gradient.stops,
+                        tile_mode=tile_mode,
+                    ),
+                )
+            elif isinstance(gradient, RadialGradient):
+                return ft.Paint(
+                    gradient=ft.PaintRadialGradient(
+                        center=(gradient.cx * self.scale, gradient.cy * self.scale),
+                        radius=gradient.r * self.scale,
+                        colors=colors,
+                        color_stops=gradient.stops,
+                    ),
+                )
+        except Exception:
+            pass
+
+        return None
 
     def build_selectable_chars(
         self, page: PageBackend, page_index: int, offset_x: float = 0, offset_y: float = 0

@@ -4,7 +4,7 @@ PDF Viewer - Minimal, elegant design with text selection.
 
 import flet as ft
 
-from flet_pdf_viewer import PdfDocument, PdfViewer, ViewerMode
+from flet_pdf_viewer import PdfDocument, PdfViewer, TocItem, ViewerMode
 
 COLORS = {
     "bg": "#000000",
@@ -37,6 +37,11 @@ def main(page: ft.Page):
 
     # Selected highlight color
     selected_color = [0]
+
+    # ToC state
+    toc_visible = [False]
+    expanded_items = set()  # Track which items are expanded
+    selected_toc_item = [None]  # Currently selected ToC item
 
     def build_popup(viewer):
         """Build toolbar-style popup like Notion/Linear."""
@@ -231,10 +236,7 @@ def main(page: ft.Page):
         )
 
     # Load document
-    document = PdfDocument("/Users/edoardobalducci/Downloads/Restauro-appunti.pdf")
-    # document = PdfDocument(
-    #     "/Users/edoardobalducci/Downloads/Preventivo Sviluppo Siti Komdo.pdf"
-    # )
+    document = PdfDocument("TEST - Supporting Student Hall on Arches.pdf")
 
     viewer = PdfViewer(
         source=document,
@@ -363,6 +365,128 @@ def main(page: ft.Page):
             on_hover=on_hover,
         )
 
+    # ToC sidebar reference
+    toc_sidebar_ref = ft.Ref[ft.Container]()
+    toc_content_ref = ft.Ref[ft.Column]()
+
+    def build_toc_item(item: TocItem, level: int = 0) -> ft.Control:
+        """Build a single ToC item with expand/collapse."""
+        item_id = f"{item.title}_{item.page_index}_{level}"
+        has_children = len(item.children) > 0
+        is_expanded = item_id in expanded_items
+        is_selected = selected_toc_item[0] == item_id
+
+        def on_expand_click(e):
+            e.control.data  # Prevent propagation
+            if item_id in expanded_items:
+                expanded_items.discard(item_id)
+            else:
+                expanded_items.add(item_id)
+            rebuild_toc()
+
+        def on_item_click(e):
+            selected_toc_item[0] = item_id
+            if item.page_index is not None:
+                viewer.current_page = item.page_index
+                update_page_info()
+            rebuild_toc()
+
+        def on_hover(e):
+            if not is_selected:
+                e.control.bgcolor = (
+                    COLORS["surface_hover"] if e.data == "true" else "transparent"
+                )
+                if e.control.page:
+                    e.control.update()
+
+        # Truncate long titles
+        display_title = item.title
+        if len(display_title) > 40:
+            display_title = display_title[:37] + "..."
+
+        # Build the row content
+        row_content = [
+            # Expand/collapse icon or spacer
+            ft.Container(
+                content=ft.Icon(
+                    ft.Icons.KEYBOARD_ARROW_DOWN
+                    if is_expanded
+                    else ft.Icons.KEYBOARD_ARROW_RIGHT,
+                    size=16,
+                    color=COLORS["text_muted"],
+                )
+                if has_children
+                else None,
+                width=20,
+                height=20,
+                on_click=on_expand_click if has_children else None,
+            ),
+            # Title
+            ft.Text(
+                display_title,
+                size=13,
+                color=COLORS["text"] if is_selected else COLORS["text_secondary"],
+                weight=ft.FontWeight.W_500 if is_selected else ft.FontWeight.W_400,
+                expand=True,
+                overflow=ft.TextOverflow.ELLIPSIS,
+            ),
+        ]
+
+        item_container = ft.Container(
+            content=ft.Row(row_content, spacing=4),
+            padding=ft.padding.only(left=level * 16 + 8, right=8, top=8, bottom=8),
+            border_radius=6,
+            bgcolor=COLORS["selection"] if is_selected else "transparent",
+            on_click=on_item_click,
+            on_hover=on_hover,
+        )
+
+        # Build children if expanded
+        children_controls = []
+        if has_children and is_expanded:
+            for child in item.children:
+                children_controls.append(build_toc_item(child, level + 1))
+
+        return ft.Column(
+            [item_container] + children_controls,
+            spacing=0,
+        )
+
+    def build_toc_content() -> list:
+        """Build the ToC content."""
+        toc = document.toc
+        if not toc:
+            return [
+                ft.Container(
+                    content=ft.Text(
+                        "No table of contents",
+                        size=13,
+                        color=COLORS["text_muted"],
+                        italic=True,
+                    ),
+                    padding=16,
+                )
+            ]
+
+        items = []
+        for item in toc:
+            items.append(build_toc_item(item))
+        return items
+
+    def rebuild_toc():
+        """Rebuild the ToC content."""
+        if toc_content_ref.current:
+            toc_content_ref.current.controls = build_toc_content()
+            toc_content_ref.current.update()
+
+    def toggle_toc(e):
+        """Toggle ToC sidebar visibility."""
+        toc_visible[0] = not toc_visible[0]
+        if toc_sidebar_ref.current:
+            toc_sidebar_ref.current.visible = toc_visible[0]
+            toc_sidebar_ref.current.update()
+        rebuild_toolbar()
+
     # Toolbar reference for rebuilding
     toolbar_row = ft.Ref[ft.Row]()
 
@@ -372,6 +496,32 @@ def main(page: ft.Page):
 
     def build_toolbar_controls():
         return [
+            # ToC toggle button (left side)
+            ft.Container(
+                content=ft.Container(
+                    content=ft.Icon(
+                        ft.Icons.TOC,
+                        size=16,
+                        color=COLORS["text"]
+                        if toc_visible[0]
+                        else COLORS["text_secondary"],
+                    ),
+                    width=32,
+                    height=32,
+                    border_radius=6,
+                    alignment=ft.alignment.center,
+                    on_click=toggle_toc,
+                    bgcolor=COLORS["surface_hover"] if toc_visible[0] else None,
+                ),
+                bgcolor=COLORS["surface"],
+                border=ft.border.all(
+                    1,
+                    COLORS["selection"] if toc_visible[0] else COLORS["border"],
+                ),
+                border_radius=8,
+                padding=4,
+                tooltip="Table of Contents",
+            ),
             ft.Container(expand=True),
             # Save button
             ft.Container(
@@ -499,6 +649,42 @@ def main(page: ft.Page):
         border=ft.border.only(bottom=ft.BorderSide(1, COLORS["border"])),
     )
 
+    # ToC Sidebar
+    toc_sidebar = ft.Container(
+        ref=toc_sidebar_ref,
+        content=ft.Column(
+            [
+                # Header
+                ft.Container(
+                    content=ft.Text(
+                        "Contents",
+                        size=14,
+                        color=COLORS["text"],
+                        weight=ft.FontWeight.W_600,
+                    ),
+                    padding=ft.padding.only(left=16, right=16, top=16, bottom=8),
+                ),
+                # Scrollable ToC items
+                ft.Container(
+                    content=ft.Column(
+                        build_toc_content(),
+                        ref=toc_content_ref,
+                        spacing=0,
+                        scroll=ft.ScrollMode.AUTO,
+                    ),
+                    expand=True,
+                    padding=ft.padding.only(bottom=16),
+                ),
+            ],
+            spacing=0,
+            expand=True,
+        ),
+        width=300,
+        bgcolor=COLORS["surface"],
+        border=ft.border.only(right=ft.BorderSide(1, COLORS["border"])),
+        visible=False,
+    )
+
     # Content area with scroll
     content = ft.Container(
         content=ft.Column(
@@ -517,10 +703,20 @@ def main(page: ft.Page):
         expand=True,
     )
 
+    # Main content area with sidebar
+    main_content = ft.Row(
+        [
+            toc_sidebar,
+            content,
+        ],
+        spacing=0,
+        expand=True,
+    )
+
     # Layout
     page.add(
         ft.Column(
-            [toolbar, content],
+            [toolbar, main_content],
             spacing=0,
             expand=True,
         )

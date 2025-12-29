@@ -12,11 +12,13 @@ from typing import Callable, List, Optional, Tuple
 import flet as ft
 import flet.canvas as cv
 
+import webbrowser
+
 from .backends.base import DocumentBackend
 from .interactions.drawing import DrawingHandler
 from .interactions.selection import SelectionHandler
 from .rendering.renderer import PageRenderer
-from .types import Color, SelectableChar, TocItem, ViewerMode
+from .types import Color, LinkInfo, SelectableChar, TocItem, ViewerMode
 
 
 class PdfViewer:
@@ -43,6 +45,7 @@ class PdfViewer:
         popup_builder: Optional[Callable[["PdfViewer"], ft.Control]] = None,
         on_page_change: Optional[Callable[[int], None]] = None,
         on_selection_change: Optional[Callable[[str], None]] = None,
+        on_link_click: Optional[Callable[[LinkInfo], bool]] = None,
     ):
         self._source = source
         self._current_page = current_page
@@ -53,6 +56,7 @@ class PdfViewer:
         self._selection_color = selection_color
         self._popup_builder = popup_builder
         self._on_page_change = on_page_change
+        self._on_link_click = on_link_click
 
         # Components
         self._renderer = PageRenderer(scale)
@@ -65,7 +69,11 @@ class PdfViewer:
         self._content_with_overlay: Optional[ft.Stack] = None
         self._selection_overlay: Optional[ft.Container] = None
         self._ink_overlay: Optional[ft.Container] = None
+        self._link_overlay: Optional[ft.Container] = None
         self._popup: Optional[ft.Container] = None
+
+        # Links storage: list of (LinkInfo, scaled_rect, page_offset_x, page_offset_y)
+        self._links: List[Tuple[LinkInfo, Tuple[float, float, float, float], float, float]] = []
 
         self._build()
 
@@ -249,11 +257,18 @@ class PdfViewer:
             top=0,
         )
 
+        self._link_overlay = ft.Container(
+            content=ft.Stack(controls=[]),
+            left=0,
+            top=0,
+        )
+
         self._popup = self._create_popup()
 
         self._content_with_overlay = ft.Stack(
             controls=[
                 self._content,
+                self._link_overlay,
                 self._selection_overlay,
                 self._ink_overlay,
                 self._popup,
@@ -265,7 +280,7 @@ class PdfViewer:
             on_pan_start=self._on_pan_start,
             on_pan_update=self._on_pan_update,
             on_pan_end=self._on_pan_end,
-            on_tap=self._on_tap,
+            on_tap_down=self._on_tap,
             drag_interval=10,
         )
 
@@ -274,13 +289,15 @@ class PdfViewer:
     def _build_content(self) -> ft.Control:
         """Build page content based on mode."""
         selectable_chars: List[SelectableChar] = []
+        self._links = []  # Reset links
 
         if not self._source:
             return ft.Container()
 
         if self._mode == ViewerMode.SINGLE_PAGE:
-            container, chars = self._create_page_container(self._current_page)
+            container, chars, links = self._create_page_container(self._current_page)
             selectable_chars.extend(chars)
+            self._links.extend(links)
             content = container
 
         elif self._mode == ViewerMode.CONTINUOUS:
@@ -288,9 +305,10 @@ class PdfViewer:
             y_offset = 0.0
 
             for i in range(self._source.page_count):
-                container, chars = self._create_page_container(i, 0, y_offset)
+                container, chars, links = self._create_page_container(i, 0, y_offset)
                 page_containers.append(container)
                 selectable_chars.extend(chars)
+                self._links.extend(links)
 
                 page = self._source.get_page(i)
                 y_offset += page.height * self._scale + self._page_gap
@@ -305,20 +323,22 @@ class PdfViewer:
             left_index = self._current_page
             right_index = self._current_page + 1
 
-            left_container, left_chars = self._create_page_container(left_index)
+            left_container, left_chars, left_links = self._create_page_container(left_index)
             selectable_chars.extend(left_chars)
+            self._links.extend(left_links)
             pages = [left_container]
 
             if right_index < self._source.page_count:
                 left_page = self._source.get_page(left_index)
                 x_offset = left_page.width * self._scale + self._page_gap
 
-                right_container, right_chars = self._create_page_container(
+                right_container, right_chars, right_links = self._create_page_container(
                     right_index, x_offset, 0
                 )
                 for char in right_chars:
                     char.page_offset_x = x_offset
                 selectable_chars.extend(right_chars)
+                self._links.extend(right_links)
                 pages.append(right_container)
 
             content = ft.Row(
@@ -331,14 +351,15 @@ class PdfViewer:
             content = ft.Container()
 
         self._selection.set_selectable_chars(selectable_chars)
+        self._update_link_overlay()
         return content
 
     def _create_page_container(
         self, page_index: int, offset_x: float = 0, offset_y: float = 0
-    ) -> Tuple[ft.Container, List[SelectableChar]]:
+    ) -> Tuple[ft.Container, List[SelectableChar], List[Tuple[LinkInfo, Tuple[float, float, float, float], float, float]]]:
         """Create a container for a single page."""
         if not self._source:
-            return ft.Container(), []
+            return ft.Container(), [], []
 
         page = self._source.get_page(page_index)
         result = self._renderer.render(page)
@@ -383,7 +404,20 @@ class PdfViewer:
         )
 
         chars = self._renderer.build_selectable_chars(page, page_index, offset_x, offset_y)
-        return container, chars
+
+        # Extract links and scale them
+        links = []
+        for link in page.get_links():
+            x0, y0, x1, y1 = link.rect
+            scaled_rect = (
+                x0 * self._scale,
+                y0 * self._scale,
+                x1 * self._scale,
+                y1 * self._scale,
+            )
+            links.append((link, scaled_rect, offset_x, offset_y))
+
+        return container, chars, links
 
     def _update_content(self):
         """Update the viewer content."""
@@ -398,6 +432,7 @@ class PdfViewer:
         if self._content_with_overlay:
             self._content_with_overlay.controls = [
                 self._content,
+                self._link_overlay,
                 self._selection_overlay,
                 self._ink_overlay,
                 self._popup,
@@ -412,6 +447,14 @@ class PdfViewer:
     # Event handlers
 
     def _on_tap(self, e: ft.TapEvent):
+        # Check if tap is on a link
+        tap_x, tap_y = e.local_x, e.local_y
+        clicked_link = self._find_link_at(tap_x, tap_y)
+
+        if clicked_link:
+            self._handle_link_click(clicked_link)
+            return
+
         if not self._drawing.enabled:
             self.clear_selection()
 
@@ -626,3 +669,89 @@ class PdfViewer:
 
         self.clear_selection()
         self._update_content()
+
+    # Links
+
+    def _update_link_overlay(self):
+        """Update link overlay with clickable areas."""
+        if not self._link_overlay or not self._link_overlay.content:
+            return
+
+        controls = []
+        for link_info, scaled_rect, offset_x, offset_y in self._links:
+            x0, y0, x1, y1 = scaled_rect
+            width = x1 - x0
+            height = y1 - y0
+
+            # Create a transparent clickable area with hover effect
+            controls.append(
+                ft.Container(
+                    left=x0 + offset_x,
+                    top=y0 + offset_y,
+                    width=width,
+                    height=height,
+                    bgcolor=ft.Colors.TRANSPARENT,
+                    border=ft.border.all(0, ft.Colors.TRANSPARENT),
+                    # Visual hint on hover
+                    on_hover=lambda e, r=(x0, y0, x1, y1): self._on_link_hover(e, r),
+                )
+            )
+
+        self._link_overlay.content.controls = controls
+
+    def _on_link_hover(self, e, rect):
+        """Handle link hover for visual feedback."""
+        if e.data == "true":
+            e.control.bgcolor = ft.Colors.with_opacity(0.1, "#3390ff")
+        else:
+            e.control.bgcolor = ft.Colors.TRANSPARENT
+        if e.control.page:
+            e.control.update()
+
+    def _find_link_at(self, x: float, y: float) -> Optional[LinkInfo]:
+        """Find a link at the given coordinates."""
+        for link_info, scaled_rect, offset_x, offset_y in self._links:
+            x0, y0, x1, y1 = scaled_rect
+            # Adjust for page offset
+            lx0 = x0 + offset_x
+            ly0 = y0 + offset_y
+            lx1 = x1 + offset_x
+            ly1 = y1 + offset_y
+
+            if lx0 <= x <= lx1 and ly0 <= y <= ly1:
+                return link_info
+
+        return None
+
+    def _handle_link_click(self, link: LinkInfo):
+        """Handle a link click."""
+        # Call custom handler first if provided
+        if self._on_link_click:
+            handled = self._on_link_click(link)
+            if handled:
+                return
+
+        # Default handling
+        if link.kind == "goto" and link.page is not None:
+            # Internal page navigation
+            if link.file:
+                # Link to another PDF file - can't handle internally
+                pass
+            else:
+                self.goto(link.page)
+
+        elif link.kind == "uri" and link.uri:
+            # External URL - open in browser
+            try:
+                webbrowser.open(link.uri)
+            except Exception:
+                pass
+
+        elif link.kind == "named" and link.name:
+            # Named destination - try to resolve
+            # Most PDFs use page numbers directly, so this is less common
+            pass
+
+        elif link.kind == "launch" and link.file:
+            # Launch external file - security risk, don't handle by default
+            pass

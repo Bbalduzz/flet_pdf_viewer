@@ -37,6 +37,10 @@ class PdfDocument:
     - Bytes
     - BytesIO
 
+    Args:
+        source: Path to PDF file, bytes, or BytesIO
+        password: Password for encrypted PDFs (optional)
+
     Properties:
     - page_count: Number of pages
     - toc: Table of contents
@@ -46,16 +50,52 @@ class PdfDocument:
     - get_page_size(index): Get (width, height)
     - save(): Save the document
     - close(): Release resources
+
+    Raises:
+        ValueError: If document is encrypted and no password provided,
+                   or if password is invalid
     """
 
-    def __init__(self, source: Union[str, Path, bytes, io.BytesIO]):
-        """Open a PDF document."""
-        self._backend = PyMuPDFBackend(source)
+    def __init__(
+        self,
+        source: Union[str, Path, bytes, io.BytesIO],
+        password: Optional[str] = None,
+    ):
+        """Open a PDF document.
+
+        Args:
+            source: Path to PDF file, bytes, or BytesIO
+            password: Password for encrypted PDFs (optional)
+        """
+        self._backend = PyMuPDFBackend(source, password=password)
 
     @property
     def page_count(self) -> int:
         """Number of pages."""
         return self._backend.page_count
+
+    @property
+    def is_encrypted(self) -> bool:
+        """Whether the document has encryption."""
+        return self._backend.is_encrypted
+
+    @property
+    def needs_password(self) -> bool:
+        """Whether password is still needed to access content.
+
+        Returns False after successful authentication.
+        """
+        return self._backend.needs_password
+
+    @property
+    def permissions(self) -> dict:
+        """Document permissions.
+
+        Returns:
+            dict with keys: 'print', 'copy', 'modify', 'annotate'
+            Each value is True if that action is permitted.
+        """
+        return self._backend.permissions
 
     @property
     def toc(self) -> List[TocItem]:

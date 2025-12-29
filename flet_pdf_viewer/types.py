@@ -39,6 +39,7 @@ class TextBlock:
     color: str = "#000000"
     bold: bool = False
     italic: bool = False
+    gradient: Optional["LinearGradient | RadialGradient"] = None
 
 
 @dataclass
@@ -110,13 +111,26 @@ class ImageInfo:
 
 @dataclass
 class GraphicsInfo:
-    """A graphics element (rect, line)."""
+    """A graphics element (rect, line, path, circle, curve)."""
 
-    type: str
+    type: str  # "rect", "line", "quad", "circle", "path"
     bbox: Tuple[float, float, float, float]
     linewidth: float = 0
     stroke_color: Optional[str] = None
     fill_color: Optional[str] = None
+    # For lines: (x1, y1, x2, y2)
+    points: Optional[List[Tuple[float, float]]] = None
+    # For paths: list of path commands
+    # Each command is a tuple: ("m", x, y) for moveto, ("l", x, y) for lineto,
+    # ("c", x1, y1, x2, y2, x3, y3) for cubic bezier, ("h",) for close
+    path_commands: Optional[List[Tuple]] = None
+    # For circles/ellipses
+    center: Optional[Tuple[float, float]] = None
+    radius: Optional[Tuple[float, float]] = None  # (rx, ry) for ellipse
+    # For gradient fills
+    fill_gradient: Optional["LinearGradient | RadialGradient"] = None
+    # For dashed strokes: [dash_length, gap_length, ...] or None for solid
+    stroke_dashes: Optional[List[float]] = None
 
 
 @dataclass
@@ -133,6 +147,22 @@ class AnnotationInfo:
 
 
 @dataclass
+class LinkInfo:
+    """A PDF link (clickable area)."""
+
+    rect: Tuple[float, float, float, float]  # Bounding box (x0, y0, x1, y1)
+    kind: str  # "goto", "uri", "named", "launch", "none"
+    # "goto" links (internal page navigation)
+    page: Optional[int] = None  # Destination page index (0-based)
+    # "uri" links (external URLs)
+    uri: Optional[str] = None
+    # "named" links (named destinations)
+    name: Optional[str] = None
+    # "launch" links (launch external app/file)
+    file: Optional[str] = None
+
+
+@dataclass
 class RenderResult:
     """Result of rendering a page."""
 
@@ -141,8 +171,34 @@ class RenderResult:
     chars: List[CharInfo] = field(default_factory=list)
 
 
+@dataclass
+class LinearGradient:
+    """Linear gradient definition."""
+
+    x0: float  # Start x
+    y0: float  # Start y
+    x1: float  # End x
+    y1: float  # End y
+    colors: List[Tuple[float, float, float]]  # List of RGB colors (0-1 range)
+    stops: Optional[List[float]] = None  # Color stop positions (0-1 range)
+    extend_start: bool = True  # Extend gradient before start point
+    extend_end: bool = True  # Extend gradient after end point
+
+
+@dataclass
+class RadialGradient:
+    """Radial gradient definition."""
+
+    cx: float  # Center x
+    cy: float  # Center y
+    r: float  # Radius
+    colors: List[Tuple[float, float, float]]
+    stops: Optional[List[float]] = None
+
+
 # Type aliases for clarity
 Color = Tuple[float, float, float]
 Rect = Tuple[float, float, float, float]
 Point = Tuple[float, float]
 Path = List[Point]
+GradientType = Optional[LinearGradient | RadialGradient]
