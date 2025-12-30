@@ -7,18 +7,27 @@ Composes backends, rendering, and interactions into a single component.
 from __future__ import annotations
 
 import os
-from typing import Callable, List, Optional, Tuple
+import webbrowser
+from typing import Callable, Dict, List, Optional, Tuple
 
 import flet as ft
 import flet.canvas as cv
 
-import webbrowser
-
 from .backends.base import DocumentBackend
 from .interactions.drawing import DrawingHandler
 from .interactions.selection import SelectionHandler
+from .interactions.shapes import ShapeDrawingHandler
 from .rendering.renderer import PageRenderer
-from .types import Color, LinkInfo, SelectableChar, TocItem, ViewerMode
+from .types import (
+    Color,
+    LinkInfo,
+    SearchOptions,
+    SearchResult,
+    SelectableChar,
+    ShapeType,
+    TocItem,
+    ViewerMode,
+)
 
 
 class PdfViewer:
@@ -46,6 +55,12 @@ class PdfViewer:
         on_page_change: Optional[Callable[[int], None]] = None,
         on_selection_change: Optional[Callable[[str], None]] = None,
         on_link_click: Optional[Callable[[LinkInfo], bool]] = None,
+        on_text_box_drawn: Optional[
+            Callable[[Tuple[float, float, float, float]], None]
+        ] = None,
+        interactive_zoom: bool = True,
+        min_scale: float = 0.25,
+        max_scale: float = 5.0,
     ):
         self._source = source
         self._current_page = current_page
@@ -57,11 +72,22 @@ class PdfViewer:
         self._popup_builder = popup_builder
         self._on_page_change = on_page_change
         self._on_link_click = on_link_click
+        self._on_text_box_drawn = on_text_box_drawn
+        self._interactive_zoom = interactive_zoom
+        self._min_scale = min_scale
+        self._max_scale = max_scale
 
         # Components
         self._renderer = PageRenderer(scale)
         self._selection = SelectionHandler(on_selection_change)
         self._drawing = DrawingHandler()
+        self._shape_drawing = ShapeDrawingHandler()
+
+        # Search state
+        self._search_results: List[SearchResult] = []
+        self._search_index: int = -1  # Current result index (-1 = none)
+        self._search_query: str = ""
+        self._search_options: SearchOptions = SearchOptions()
 
         # UI state
         self._wrapper: Optional[ft.Container] = None
@@ -69,11 +95,16 @@ class PdfViewer:
         self._content_with_overlay: Optional[ft.Stack] = None
         self._selection_overlay: Optional[ft.Container] = None
         self._ink_overlay: Optional[ft.Container] = None
+        self._shape_overlay: Optional[ft.Container] = None
         self._link_overlay: Optional[ft.Container] = None
+        self._search_overlay: Optional[ft.Container] = None
         self._popup: Optional[ft.Container] = None
+        self._interactive_viewer: Optional[ft.InteractiveViewer] = None
 
         # Links storage: list of (LinkInfo, scaled_rect, page_offset_x, page_offset_y)
-        self._links: List[Tuple[LinkInfo, Tuple[float, float, float, float], float, float]] = []
+        self._links: List[
+            Tuple[LinkInfo, Tuple[float, float, float, float], float, float]
+        ] = []
 
         self._build()
 
@@ -142,8 +173,42 @@ class PdfViewer:
 
     @property
     def drawing_mode(self) -> bool:
-        """Whether drawing mode is active."""
+        """Whether ink drawing mode is active."""
         return self._drawing.enabled
+
+    @property
+    def shape_drawing_mode(self) -> bool:
+        """Whether shape drawing mode is active."""
+        return self._shape_drawing.enabled
+
+    @property
+    def current_shape_type(self) -> ShapeType:
+        """Current shape type being drawn."""
+        return self._shape_drawing.shape_type
+
+    # Search properties
+
+    @property
+    def search_results(self) -> List[SearchResult]:
+        """All search results in the document."""
+        return self._search_results
+
+    @property
+    def search_result_count(self) -> int:
+        """Number of search results."""
+        return len(self._search_results)
+
+    @property
+    def current_search_index(self) -> int:
+        """Current search result index (0-based), or -1 if none."""
+        return self._search_index
+
+    @property
+    def current_search_result(self) -> Optional[SearchResult]:
+        """Current search result, or None if none selected."""
+        if 0 <= self._search_index < len(self._search_results):
+            return self._search_results[self._search_index]
+        return None
 
     # Navigation
 
@@ -228,16 +293,240 @@ class PdfViewer:
             self._wrapper.page.set_clipboard(self.selected_text)
         self.clear_selection()
 
+    # Interactive Viewer control
+
+    def _update_interactive_pan(self):
+        """Update InteractiveViewer pan state based on drawing modes."""
+        if self._interactive_viewer:
+            # Disable pan when any drawing mode is active
+            drawing_active = self._drawing.enabled or self._shape_drawing.enabled
+            self._interactive_viewer.pan_enabled = not drawing_active
+            if self._interactive_viewer.page:
+                self._interactive_viewer.update()
+
+    def reset_view(self):
+        """Reset the InteractiveViewer to default position and scale."""
+        if self._interactive_viewer:
+            self._interactive_viewer.reset()
+
     # Drawing
 
     def enable_drawing(self, color: Color = (0.0, 0.0, 0.0), width: float = 2.0):
         """Enable ink drawing mode."""
+        # Disable shape drawing if active
+        self._shape_drawing.disable()
         self._drawing.enable(color, width)
+        self._update_interactive_pan()
 
     def disable_drawing(self):
         """Disable ink drawing mode."""
         self._drawing.disable()
         self._update_ink_overlay()
+        self._update_interactive_pan()
+
+    # Shape Drawing
+
+    def enable_shape_drawing(
+        self,
+        shape_type: ShapeType,
+        stroke_color: Color = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        stroke_width: float = 2.0,
+    ):
+        """Enable shape drawing mode.
+
+        Args:
+            shape_type: The type of shape to draw (RECTANGLE, CIRCLE, LINE, ARROW)
+            stroke_color: Border/stroke color as RGB tuple (0-1 range)
+            fill_color: Fill color as RGB tuple, or None for no fill
+            stroke_width: Stroke width in points
+        """
+        # Disable ink drawing if active
+        self._drawing.disable()
+        self._shape_drawing.enable(shape_type, stroke_color, fill_color, stroke_width)
+        self._update_interactive_pan()
+
+    def disable_shape_drawing(self):
+        """Disable shape drawing mode."""
+        self._shape_drawing.disable()
+        self._update_shape_overlay()
+        self._update_interactive_pan()
+
+    def enable_rectangle_drawing(
+        self,
+        stroke_color: Color = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        stroke_width: float = 2.0,
+    ):
+        """Enable rectangle drawing mode (convenience method)."""
+        self.enable_shape_drawing(
+            ShapeType.RECTANGLE, stroke_color, fill_color, stroke_width
+        )
+
+    def enable_circle_drawing(
+        self,
+        stroke_color: Color = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        stroke_width: float = 2.0,
+    ):
+        """Enable circle/ellipse drawing mode (convenience method)."""
+        self.enable_shape_drawing(
+            ShapeType.CIRCLE, stroke_color, fill_color, stroke_width
+        )
+
+    def enable_line_drawing(
+        self,
+        color: Color = (0.0, 0.0, 0.0),
+        width: float = 2.0,
+    ):
+        """Enable line drawing mode (convenience method)."""
+        self.enable_shape_drawing(ShapeType.LINE, color, None, width)
+
+    def enable_arrow_drawing(
+        self,
+        color: Color = (0.0, 0.0, 0.0),
+        width: float = 2.0,
+    ):
+        """Enable arrow drawing mode (convenience method)."""
+        self.enable_shape_drawing(ShapeType.ARROW, color, None, width)
+
+    def enable_text_drawing(
+        self,
+        stroke_color: Color = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = (1.0, 1.0, 0.9),
+        stroke_width: float = 1.0,
+    ):
+        """Enable text box drawing mode (convenience method).
+
+        Draw a rectangle where you want the text box to appear.
+        After drawing, the on_text_box_drawn callback will be called
+        with the rect coordinates (in PDF points).
+        """
+        self.enable_shape_drawing(
+            ShapeType.TEXT, stroke_color, fill_color, stroke_width
+        )
+
+    # Search methods
+
+    def search(
+        self,
+        query: str,
+        case_sensitive: bool = False,
+        whole_word: bool = False,
+        start_page: Optional[int] = None,
+    ) -> List[SearchResult]:
+        """Search for text in the document.
+
+        Searches all pages and stores results. Use search_next/search_prev
+        to navigate between results.
+
+        Args:
+            query: Text to search for
+            case_sensitive: Whether search is case-sensitive
+            whole_word: Whether to match whole words only
+            start_page: Page to start searching from (default: current page)
+
+        Returns:
+            List of all SearchResult objects found
+        """
+        if not self._source or not query:
+            self.clear_search()
+            return []
+
+        self._search_query = query
+        self._search_options = SearchOptions(
+            case_sensitive=case_sensitive,
+            whole_word=whole_word,
+        )
+        self._search_results = []
+
+        # Search all pages
+        for page_idx in range(self._source.page_count):
+            page = self._source.get_page(page_idx)
+            page_results = page.search_text(query, case_sensitive, whole_word)
+            self._search_results.extend(page_results)
+
+        # Set initial search index
+        if self._search_results:
+            # Find first result on or after current page
+            start = start_page if start_page is not None else self._current_page
+            self._search_index = 0
+            for i, result in enumerate(self._search_results):
+                if result.page_index >= start:
+                    self._search_index = i
+                    break
+
+            # Navigate to the result
+            self._goto_search_result(self._search_index)
+        else:
+            self._search_index = -1
+
+        self._update_search_overlay()
+        return self._search_results
+
+    def search_next(self) -> Optional[SearchResult]:
+        """Go to next search result.
+
+        Returns:
+            The next SearchResult, or None if no results
+        """
+        if not self._search_results:
+            return None
+
+        self._search_index = (self._search_index + 1) % len(self._search_results)
+        self._goto_search_result(self._search_index)
+        self._update_search_overlay()
+        return self._search_results[self._search_index]
+
+    def search_prev(self) -> Optional[SearchResult]:
+        """Go to previous search result.
+
+        Returns:
+            The previous SearchResult, or None if no results
+        """
+        if not self._search_results:
+            return None
+
+        self._search_index = (self._search_index - 1) % len(self._search_results)
+        self._goto_search_result(self._search_index)
+        self._update_search_overlay()
+        return self._search_results[self._search_index]
+
+    def goto_search_result(self, index: int) -> Optional[SearchResult]:
+        """Go to a specific search result by index.
+
+        Args:
+            index: The 0-based index of the result to go to
+
+        Returns:
+            The SearchResult at that index, or None if invalid
+        """
+        if not self._search_results or not (0 <= index < len(self._search_results)):
+            return None
+
+        self._search_index = index
+        self._goto_search_result(index)
+        self._update_search_overlay()
+        return self._search_results[index]
+
+    def clear_search(self):
+        """Clear search results and highlights."""
+        self._search_results = []
+        self._search_index = -1
+        self._search_query = ""
+        self._update_search_overlay()
+
+    def _goto_search_result(self, index: int):
+        """Navigate to a search result."""
+        if not (0 <= index < len(self._search_results)):
+            return
+
+        result = self._search_results[index]
+
+        # Navigate to the page if not in continuous mode
+        if self._mode != ViewerMode.CONTINUOUS:
+            if result.page_index != self._current_page:
+                self.goto(result.page_index)
 
     # Private methods
 
@@ -257,7 +546,19 @@ class PdfViewer:
             top=0,
         )
 
+        self._shape_overlay = ft.Container(
+            content=cv.Canvas(shapes=[], width=10000, height=10000),
+            left=0,
+            top=0,
+        )
+
         self._link_overlay = ft.Container(
+            content=ft.Stack(controls=[]),
+            left=0,
+            top=0,
+        )
+
+        self._search_overlay = ft.Container(
             content=ft.Stack(controls=[]),
             left=0,
             top=0,
@@ -269,8 +570,10 @@ class PdfViewer:
             controls=[
                 self._content,
                 self._link_overlay,
+                self._search_overlay,
                 self._selection_overlay,
                 self._ink_overlay,
+                self._shape_overlay,
                 self._popup,
             ],
         )
@@ -284,7 +587,19 @@ class PdfViewer:
             drag_interval=10,
         )
 
-        self._wrapper = ft.Container(content=gesture_detector)
+        if self._interactive_zoom:
+            self._interactive_viewer = ft.InteractiveViewer(
+                content=gesture_detector,
+                min_scale=self._min_scale,
+                max_scale=self._max_scale,
+                pan_enabled=True,
+                scale_enabled=True,
+                trackpad_scroll_causes_scale=False,
+                boundary_margin=100,
+            )
+            self._wrapper = ft.Container(content=self._interactive_viewer)
+        else:
+            self._wrapper = ft.Container(content=gesture_detector)
 
     def _build_content(self) -> ft.Control:
         """Build page content based on mode."""
@@ -323,7 +638,9 @@ class PdfViewer:
             left_index = self._current_page
             right_index = self._current_page + 1
 
-            left_container, left_chars, left_links = self._create_page_container(left_index)
+            left_container, left_chars, left_links = self._create_page_container(
+                left_index
+            )
             selectable_chars.extend(left_chars)
             self._links.extend(left_links)
             pages = [left_container]
@@ -356,7 +673,11 @@ class PdfViewer:
 
     def _create_page_container(
         self, page_index: int, offset_x: float = 0, offset_y: float = 0
-    ) -> Tuple[ft.Container, List[SelectableChar], List[Tuple[LinkInfo, Tuple[float, float, float, float], float, float]]]:
+    ) -> Tuple[
+        ft.Container,
+        List[SelectableChar],
+        List[Tuple[LinkInfo, Tuple[float, float, float, float], float, float]],
+    ]:
         """Create a container for a single page."""
         if not self._source:
             return ft.Container(), [], []
@@ -378,7 +699,9 @@ class PdfViewer:
             if os.path.exists(img_path):
                 content_controls.append(
                     ft.Container(
-                        content=ft.Image(src=img_path, width=w, height=h, fit=ft.ImageFit.FILL),
+                        content=ft.Image(
+                            src=img_path, width=w, height=h, fit=ft.ImageFit.FILL
+                        ),
                         left=x,
                         top=y,
                     )
@@ -403,7 +726,9 @@ class PdfViewer:
             ),
         )
 
-        chars = self._renderer.build_selectable_chars(page, page_index, offset_x, offset_y)
+        chars = self._renderer.build_selectable_chars(
+            page, page_index, offset_x, offset_y
+        )
 
         # Extract links and scale them
         links = []
@@ -433,8 +758,10 @@ class PdfViewer:
             self._content_with_overlay.controls = [
                 self._content,
                 self._link_overlay,
+                self._search_overlay,
                 self._selection_overlay,
                 self._ink_overlay,
+                self._shape_overlay,
                 self._popup,
             ]
 
@@ -455,13 +782,16 @@ class PdfViewer:
             self._handle_link_click(clicked_link)
             return
 
-        if not self._drawing.enabled:
+        if not self._drawing.enabled and not self._shape_drawing.enabled:
             self.clear_selection()
 
     def _on_pan_start(self, e: ft.DragStartEvent):
         if self._drawing.enabled:
             self._drawing.start_stroke(e.local_x, e.local_y)
             self._update_ink_overlay()
+        elif self._shape_drawing.enabled:
+            self._shape_drawing.start_shape(e.local_x, e.local_y)
+            self._update_shape_overlay()
         else:
             self._selection.start_selection(e.local_x, e.local_y)
             self._hide_popup()
@@ -470,6 +800,9 @@ class PdfViewer:
         if self._drawing.enabled:
             self._drawing.add_point(e.local_x, e.local_y)
             self._update_ink_overlay()
+        elif self._shape_drawing.enabled:
+            self._shape_drawing.update_shape(e.local_x, e.local_y)
+            self._update_shape_overlay()
         else:
             self._selection.update_selection(e.local_x, e.local_y)
             self._update_selection_overlay()
@@ -477,6 +810,8 @@ class PdfViewer:
     def _on_pan_end(self, e: ft.DragEndEvent):
         if self._drawing.enabled:
             self._save_ink_annotation()
+        elif self._shape_drawing.enabled:
+            self._save_shape_annotation()
         else:
             self._selection.end_selection()
             if self._selection.selected_chars:
@@ -500,7 +835,9 @@ class PdfViewer:
 
         def action_btn(icon: str, tooltip: str, on_click, color: str = "#a1a1a1"):
             def on_hover(e):
-                e.control.bgcolor = "rgba(255,255,255,0.1)" if e.data == "true" else None
+                e.control.bgcolor = (
+                    "rgba(255,255,255,0.1)" if e.data == "true" else None
+                )
                 if e.control.page:
                     e.control.update()
 
@@ -517,11 +854,31 @@ class PdfViewer:
 
         popup_content = ft.Row(
             controls=[
-                action_btn(ft.Icons.EDIT, "Highlight", lambda e: self.highlight_selection(), "#facc15"),
-                action_btn(ft.Icons.FORMAT_UNDERLINED, "Underline", lambda e: self.underline_selection(), "#3b82f6"),
-                action_btn(ft.Icons.FORMAT_STRIKETHROUGH, "Strikethrough", lambda e: self.strikethrough_selection(), "#ef4444"),
+                action_btn(
+                    ft.Icons.EDIT,
+                    "Highlight",
+                    lambda e: self.highlight_selection(),
+                    "#facc15",
+                ),
+                action_btn(
+                    ft.Icons.FORMAT_UNDERLINED,
+                    "Underline",
+                    lambda e: self.underline_selection(),
+                    "#3b82f6",
+                ),
+                action_btn(
+                    ft.Icons.FORMAT_STRIKETHROUGH,
+                    "Strikethrough",
+                    lambda e: self.strikethrough_selection(),
+                    "#ef4444",
+                ),
                 ft.Container(width=1, height=24, bgcolor="rgba(255,255,255,0.15)"),
-                action_btn(ft.Icons.COPY_ROUNDED, "Copy", lambda e: self.copy_selection(), "#a1a1a1"),
+                action_btn(
+                    ft.Icons.COPY_ROUNDED,
+                    "Copy",
+                    lambda e: self.copy_selection(),
+                    "#a1a1a1",
+                ),
             ],
             spacing=2,
         )
@@ -594,6 +951,109 @@ class PdfViewer:
         if self._wrapper and self._wrapper.page:
             self._selection_overlay.update()
 
+    def _update_search_overlay(self):
+        """Update search result highlights."""
+        if not self._search_overlay or not self._search_overlay.content:
+            return
+
+        controls = []
+
+        # Calculate page offsets for each page (needed for continuous mode)
+        page_offsets: Dict[int, Tuple[float, float]] = {}
+        if self._source:
+            if self._mode == ViewerMode.CONTINUOUS:
+                y_offset = 0.0
+                for i in range(self._source.page_count):
+                    page_offsets[i] = (0, y_offset)
+                    page = self._source.get_page(i)
+                    y_offset += page.height * self._scale + self._page_gap
+            elif self._mode == ViewerMode.DOUBLE_PAGE:
+                page_offsets[self._current_page] = (0, 0)
+                if self._current_page + 1 < self._source.page_count:
+                    left_page = self._source.get_page(self._current_page)
+                    x_offset = left_page.width * self._scale + self._page_gap
+                    page_offsets[self._current_page + 1] = (x_offset, 0)
+            else:
+                page_offsets[self._current_page] = (0, 0)
+
+        # Create highlight rectangles for each search result
+        for i, result in enumerate(self._search_results):
+            # In single/double page mode, only show results on visible pages
+            if self._mode == ViewerMode.SINGLE_PAGE:
+                if result.page_index != self._current_page:
+                    continue
+            elif self._mode == ViewerMode.DOUBLE_PAGE:
+                if result.page_index not in (
+                    self._current_page,
+                    self._current_page + 1,
+                ):
+                    continue
+
+            offset_x, offset_y = page_offsets.get(result.page_index, (0, 0))
+            x0, y0, x1, y1 = result.rect
+
+            # Scale the rect
+            sx0 = x0 * self._scale + offset_x
+            sy0 = y0 * self._scale + offset_y
+            sx1 = x1 * self._scale + offset_x
+            sy1 = y1 * self._scale + offset_y
+
+            # Current result gets a different highlight color
+            is_current = i == self._search_index
+            if is_current:
+                bgcolor = ft.Colors.with_opacity(0.5, "#ff9500")  # Orange for current
+                border = ft.border.all(2, "#ff9500")
+            else:
+                bgcolor = ft.Colors.with_opacity(0.3, "#ffff00")  # Yellow for others
+                border = None
+
+            controls.append(
+                ft.Container(
+                    left=sx0,
+                    top=sy0,
+                    width=sx1 - sx0,
+                    height=sy1 - sy0,
+                    bgcolor=bgcolor,
+                    border=border,
+                    border_radius=2,
+                )
+            )
+
+        self._search_overlay.content.controls = controls
+        if self._wrapper and self._wrapper.page:
+            self._search_overlay.update()
+
+    def _catmull_rom_to_bezier(
+        self, points: List[Tuple[float, float]], tension: float = 0.5
+    ) -> List:
+        """Convert points to smooth path using Catmull-Rom splines."""
+        if len(points) < 2:
+            return []
+
+        if len(points) == 2:
+            return [
+                cv.Path.MoveTo(points[0][0], points[0][1]),
+                cv.Path.LineTo(points[1][0], points[1][1]),
+            ]
+
+        # Duplicate first and last points for the spline
+        pts = [points[0]] + list(points) + [points[-1]]
+
+        elements = [cv.Path.MoveTo(points[0][0], points[0][1])]
+
+        # Convert each Catmull-Rom segment to cubic bezier
+        for i in range(1, len(pts) - 2):
+            p0, p1, p2, p3 = pts[i - 1], pts[i], pts[i + 1], pts[i + 2]
+
+            cp1x = p1[0] + (p2[0] - p0[0]) * tension / 3
+            cp1y = p1[1] + (p2[1] - p0[1]) * tension / 3
+            cp2x = p2[0] - (p3[0] - p1[0]) * tension / 3
+            cp2y = p2[1] - (p3[1] - p1[1]) * tension / 3
+
+            elements.append(cv.Path.CubicTo(cp1x, cp1y, cp2x, cp2y, p2[0], p2[1]))
+
+        return elements
+
     def _update_ink_overlay(self):
         """Update ink drawing overlay."""
         if not self._ink_overlay or not self._ink_overlay.content:
@@ -607,24 +1067,20 @@ class PdfViewer:
             return
 
         hex_color = self._drawing.get_overlay_color_hex()
-        shapes = []
+        elements = self._catmull_rom_to_bezier(path)
 
-        for i in range(len(path) - 1):
-            x1, y1 = path[i]
-            x2, y2 = path[i + 1]
-            shapes.append(
-                cv.Line(
-                    x1=x1,
-                    y1=y1,
-                    x2=x2,
-                    y2=y2,
-                    paint=ft.Paint(
-                        stroke_width=self._drawing.width * self._scale,
-                        color=hex_color,
-                        stroke_cap=ft.StrokeCap.ROUND,
-                    ),
-                )
+        shapes = [
+            cv.Path(
+                elements,
+                paint=ft.Paint(
+                    stroke_width=self._drawing.width * self._scale,
+                    color=hex_color,
+                    style=ft.PaintingStyle.STROKE,
+                    stroke_cap=ft.StrokeCap.ROUND,
+                    stroke_join=ft.StrokeJoin.ROUND,
+                ),
             )
+        ]
 
         self._ink_overlay.content.shapes = shapes
         if self._wrapper and self._wrapper.page and self._ink_overlay.page:
@@ -644,6 +1100,244 @@ class PdfViewer:
         page.add_ink([pdf_path], self._drawing.color, self._drawing.width)
 
         self._update_ink_overlay()
+        self._update_content()
+
+    def _update_shape_overlay(self):
+        """Update shape drawing overlay."""
+        if not self._shape_overlay or not self._shape_overlay.content:
+            return
+
+        if not self._shape_drawing.is_drawing:
+            self._shape_overlay.content.shapes = []
+            if self._wrapper and self._wrapper.page and self._shape_overlay.page:
+                self._shape_overlay.update()
+            return
+
+        stroke_hex = self._shape_drawing.get_stroke_color_hex()
+        fill_hex = self._shape_drawing.get_fill_color_hex()
+        stroke_width = self._shape_drawing.stroke_width * self._scale
+        shape_type = self._shape_drawing.shape_type
+
+        shapes = []
+
+        if shape_type in (ShapeType.RECTANGLE, ShapeType.TEXT):
+            rect = self._shape_drawing.get_current_rect()
+            if rect:
+                x0, y0, x1, y1 = rect
+                width = x1 - x0
+                height = y1 - y0
+                # Draw fill first if present
+                if fill_hex:
+                    shapes.append(
+                        cv.Rect(
+                            x0,
+                            y0,
+                            width,
+                            height,
+                            paint=ft.Paint(
+                                color=fill_hex,
+                                style=ft.PaintingStyle.FILL,
+                            ),
+                        )
+                    )
+                # Draw stroke
+                shapes.append(
+                    cv.Rect(
+                        x0,
+                        y0,
+                        width,
+                        height,
+                        paint=ft.Paint(
+                            stroke_width=stroke_width,
+                            color=stroke_hex,
+                            style=ft.PaintingStyle.STROKE,
+                        ),
+                    )
+                )
+
+        elif shape_type == ShapeType.CIRCLE:
+            rect = self._shape_drawing.get_current_rect()
+            if rect:
+                x0, y0, x1, y1 = rect
+                # Draw fill first if present
+                if fill_hex:
+                    shapes.append(
+                        cv.Oval(
+                            x0,
+                            y0,
+                            x1,
+                            y1,
+                            paint=ft.Paint(
+                                color=fill_hex,
+                                style=ft.PaintingStyle.FILL,
+                            ),
+                        )
+                    )
+                # Draw stroke
+                shapes.append(
+                    cv.Oval(
+                        x0,
+                        y0,
+                        x1,
+                        y1,
+                        paint=ft.Paint(
+                            stroke_width=stroke_width,
+                            color=stroke_hex,
+                            style=ft.PaintingStyle.STROKE,
+                        ),
+                    )
+                )
+
+        elif shape_type in (ShapeType.LINE, ShapeType.ARROW):
+            line = self._shape_drawing.get_current_line()
+            if line:
+                x1, y1, x2, y2 = line
+                shapes.append(
+                    cv.Line(
+                        x1,
+                        y1,
+                        x2,
+                        y2,
+                        paint=ft.Paint(
+                            stroke_width=stroke_width,
+                            color=stroke_hex,
+                            style=ft.PaintingStyle.STROKE,
+                            stroke_cap=ft.StrokeCap.ROUND,
+                        ),
+                    )
+                )
+                # Draw arrow head for arrow type
+                if shape_type == ShapeType.ARROW:
+                    arrow_shapes = self._create_arrow_head(
+                        x1, y1, x2, y2, stroke_hex, stroke_width
+                    )
+                    shapes.extend(arrow_shapes)
+
+        self._shape_overlay.content.shapes = shapes
+        if self._wrapper and self._wrapper.page and self._shape_overlay.page:
+            self._shape_overlay.update()
+
+    def _create_arrow_head(
+        self,
+        x1: float,
+        y1: float,
+        x2: float,
+        y2: float,
+        color: str,
+        stroke_width: float,
+    ) -> list:
+        """Create arrow head shapes at the end point."""
+        import math
+
+        # Calculate angle of the line
+        dx = x2 - x1
+        dy = y2 - y1
+        angle = math.atan2(dy, dx)
+
+        # Arrow head size proportional to stroke width
+        arrow_length = max(12, stroke_width * 4)
+        arrow_angle = math.pi / 6  # 30 degrees
+
+        # Calculate arrow head points
+        ax1 = x2 - arrow_length * math.cos(angle - arrow_angle)
+        ay1 = y2 - arrow_length * math.sin(angle - arrow_angle)
+        ax2 = x2 - arrow_length * math.cos(angle + arrow_angle)
+        ay2 = y2 - arrow_length * math.sin(angle + arrow_angle)
+
+        # Create filled triangle for arrow head
+        path_elements = [
+            cv.Path.MoveTo(x2, y2),
+            cv.Path.LineTo(ax1, ay1),
+            cv.Path.LineTo(ax2, ay2),
+            cv.Path.Close(),
+        ]
+
+        return [
+            cv.Path(
+                path_elements,
+                paint=ft.Paint(
+                    color=color,
+                    style=ft.PaintingStyle.FILL,
+                ),
+            )
+        ]
+
+    def _save_shape_annotation(self):
+        """Save current shape as annotation."""
+        shape_data = self._shape_drawing.end_shape()
+
+        if not self._source or not shape_data:
+            self._update_shape_overlay()
+            return
+
+        shape_type, x1, y1, x2, y2 = shape_data
+
+        # Convert from screen coordinates to PDF coordinates
+        pdf_x1 = x1 / self._scale
+        pdf_y1 = y1 / self._scale
+        pdf_x2 = x2 / self._scale
+        pdf_y2 = y2 / self._scale
+
+        page = self._source.get_page(self._current_page)
+        stroke_color = self._shape_drawing.stroke_color
+        fill_color = self._shape_drawing.fill_color
+        stroke_width = self._shape_drawing.stroke_width
+
+        if shape_type == ShapeType.RECTANGLE:
+            # Normalize rect
+            rx0 = min(pdf_x1, pdf_x2)
+            ry0 = min(pdf_y1, pdf_y2)
+            rx1 = max(pdf_x1, pdf_x2)
+            ry1 = max(pdf_y1, pdf_y2)
+            page.add_rect(
+                (rx0, ry0, rx1, ry1),
+                stroke_color=stroke_color,
+                fill_color=fill_color,
+                width=stroke_width,
+            )
+
+        elif shape_type == ShapeType.CIRCLE:
+            # Normalize rect for ellipse bounds
+            rx0 = min(pdf_x1, pdf_x2)
+            ry0 = min(pdf_y1, pdf_y2)
+            rx1 = max(pdf_x1, pdf_x2)
+            ry1 = max(pdf_y1, pdf_y2)
+            page.add_circle(
+                (rx0, ry0, rx1, ry1),
+                stroke_color=stroke_color,
+                fill_color=fill_color,
+                width=stroke_width,
+            )
+
+        elif shape_type == ShapeType.LINE:
+            page.add_line(
+                (pdf_x1, pdf_y1),
+                (pdf_x2, pdf_y2),
+                color=stroke_color,
+                width=stroke_width,
+            )
+
+        elif shape_type == ShapeType.ARROW:
+            page.add_arrow(
+                (pdf_x1, pdf_y1),
+                (pdf_x2, pdf_y2),
+                color=stroke_color,
+                width=stroke_width,
+            )
+
+        elif shape_type == ShapeType.TEXT:
+            # Normalize rect
+            rx0 = min(pdf_x1, pdf_x2)
+            ry0 = min(pdf_y1, pdf_y2)
+            rx1 = max(pdf_x1, pdf_x2)
+            ry1 = max(pdf_y1, pdf_y2)
+            # Call the callback instead of adding annotation directly
+            if self._on_text_box_drawn:
+                self._on_text_box_drawn((rx0, ry0, rx1, ry1))
+            self._update_shape_overlay()
+            return  # Don't update content yet - callback will handle it
+
+        self._update_shape_overlay()
         self._update_content()
 
     # Annotations

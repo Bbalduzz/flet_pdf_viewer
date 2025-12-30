@@ -14,11 +14,17 @@ from ..types import (
     Color,
     GraphicsInfo,
     ImageInfo,
+    LineEndStyle,
+    LinkInfo,
     OutlineItem,
     PageInfo,
-    Path as InkPath,
+    Point,
     Rect,
+    SearchResult,
     TextBlock,
+)
+from ..types import (
+    Path as InkPath,
 )
 
 
@@ -73,6 +79,30 @@ class PageBackend(ABC):
         """Get all annotations on the page."""
         ...
 
+    @abstractmethod
+    def get_links(self) -> List[LinkInfo]:
+        """Get all links on the page."""
+        ...
+
+    @abstractmethod
+    def search_text(
+        self,
+        query: str,
+        case_sensitive: bool = False,
+        whole_word: bool = False,
+    ) -> List[SearchResult]:
+        """Search for text on this page.
+
+        Args:
+            query: The text to search for
+            case_sensitive: Whether search is case-sensitive
+            whole_word: Whether to match whole words only
+
+        Returns:
+            List of SearchResult with match locations
+        """
+        ...
+
     # Annotation methods
     @abstractmethod
     def add_highlight(self, rects: List[Rect], color: Color) -> None:
@@ -113,6 +143,149 @@ class PageBackend(ABC):
         width: float,
     ) -> None:
         """Add ink (freehand) annotation."""
+        ...
+
+    # Shape annotations
+    @abstractmethod
+    def add_freetext(
+        self,
+        rect: Rect,
+        text: str,
+        font_size: float = 12.0,
+        font_name: str = "helv",
+        text_color: Color = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        border_color: Optional[Color] = None,
+        border_width: float = 0.0,
+        align: int = 0,  # 0=left, 1=center, 2=right
+    ) -> None:
+        """Add free text annotation.
+
+        Args:
+            rect: Bounding rectangle for the text box
+            text: The text content
+            font_size: Font size in points
+            font_name: Font name (helv, tiro, cour, etc.)
+            text_color: Text color RGB tuple
+            fill_color: Background fill color (None for transparent)
+            border_color: Border color (None for no border)
+            border_width: Border width
+            align: Text alignment (0=left, 1=center, 2=right)
+        """
+        ...
+
+    @abstractmethod
+    def add_rect(
+        self,
+        rect: Rect,
+        stroke_color: Optional[Color] = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        width: float = 1.0,
+    ) -> None:
+        """Add rectangle annotation.
+
+        Args:
+            rect: The rectangle coordinates
+            stroke_color: Border color (None for no border)
+            fill_color: Fill color (None for no fill)
+            width: Border width
+        """
+        ...
+
+    @abstractmethod
+    def add_circle(
+        self,
+        rect: Rect,
+        stroke_color: Optional[Color] = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        width: float = 1.0,
+    ) -> None:
+        """Add circle/ellipse annotation.
+
+        Args:
+            rect: Bounding rectangle for the ellipse
+            stroke_color: Border color (None for no border)
+            fill_color: Fill color (None for no fill)
+            width: Border width
+        """
+        ...
+
+    @abstractmethod
+    def add_line(
+        self,
+        start: Point,
+        end: Point,
+        color: Color = (0.0, 0.0, 0.0),
+        width: float = 1.0,
+        start_style: LineEndStyle = LineEndStyle.NONE,
+        end_style: LineEndStyle = LineEndStyle.NONE,
+    ) -> None:
+        """Add line annotation.
+
+        Args:
+            start: Start point (x, y)
+            end: End point (x, y)
+            color: Line color
+            width: Line width
+            start_style: Line ending style at start
+            end_style: Line ending style at end
+        """
+        ...
+
+    @abstractmethod
+    def add_arrow(
+        self,
+        start: Point,
+        end: Point,
+        color: Color = (0.0, 0.0, 0.0),
+        width: float = 1.0,
+    ) -> None:
+        """Add arrow annotation (line with arrow head at end).
+
+        Args:
+            start: Start point (x, y)
+            end: End point (x, y) - arrow head here
+            color: Line color
+            width: Line width
+        """
+        ...
+
+    @abstractmethod
+    def add_polygon(
+        self,
+        points: List[Point],
+        stroke_color: Optional[Color] = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        width: float = 1.0,
+    ) -> None:
+        """Add polygon annotation (closed shape).
+
+        Args:
+            points: List of vertices
+            stroke_color: Border color
+            fill_color: Fill color
+            width: Border width
+        """
+        ...
+
+    @abstractmethod
+    def add_polyline(
+        self,
+        points: List[Point],
+        color: Color = (0.0, 0.0, 0.0),
+        width: float = 1.0,
+        start_style: LineEndStyle = LineEndStyle.NONE,
+        end_style: LineEndStyle = LineEndStyle.NONE,
+    ) -> None:
+        """Add polyline annotation (open shape).
+
+        Args:
+            points: List of vertices
+            color: Line color
+            width: Line width
+            start_style: Line ending style at start
+            end_style: Line ending style at end
+        """
         ...
 
 

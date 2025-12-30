@@ -196,6 +196,55 @@ class RadialGradient:
     stops: Optional[List[float]] = None
 
 
+class LineEndStyle(Enum):
+    """Line ending styles for line/arrow annotations."""
+
+    NONE = "none"
+    SQUARE = "square"
+    CIRCLE = "circle"
+    DIAMOND = "diamond"
+    OPEN_ARROW = "open_arrow"
+    CLOSED_ARROW = "closed_arrow"
+    BUTT = "butt"
+    R_OPEN_ARROW = "r_open_arrow"
+    R_CLOSED_ARROW = "r_closed_arrow"
+    SLASH = "slash"
+
+
+class ShapeType(Enum):
+    """Shape types for interactive drawing."""
+
+    NONE = "none"
+    RECTANGLE = "rectangle"
+    CIRCLE = "circle"
+    LINE = "line"
+    ARROW = "arrow"
+    TEXT = "text"
+
+
+@dataclass
+class SearchResult:
+    """A single search match in the document."""
+
+    page_index: int
+    rect: Tuple[float, float, float, float]  # Bounding box (x0, y0, x1, y1)
+    text: str  # The matched text
+    # Additional quads for multi-line matches (optional)
+    quads: Optional[List[Tuple[float, float, float, float]]] = None
+
+
+@dataclass
+class SearchOptions:
+    """Options for text search."""
+
+    case_sensitive: bool = False
+    whole_word: bool = False
+    # Search direction
+    forward: bool = True
+    # Wrap around when reaching document end/start
+    wrap: bool = True
+
+
 # Type aliases for clarity
 Color = Tuple[float, float, float]
 Rect = Tuple[float, float, float, float]

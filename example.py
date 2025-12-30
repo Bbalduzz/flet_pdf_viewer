@@ -4,7 +4,14 @@ PDF Viewer - Minimal, elegant design with text selection.
 
 import flet as ft
 
-from flet_pdf_viewer import PdfDocument, PdfViewer, TocItem, ViewerMode
+from flet_pdf_viewer import (
+    LineEndStyle,
+    PdfDocument,
+    PdfViewer,
+    ShapeType,
+    TocItem,
+    ViewerMode,
+)
 
 COLORS = {
     "bg": "#000000",
@@ -25,6 +32,9 @@ HIGHLIGHT_COLORS = [
     ("#bbf7d0", (0.73, 0.97, 0.82)),  # Light green
     ("#fecaca", (1.0, 0.79, 0.79)),  # Pink
 ]
+
+# PDF_PATH = "TEST - Supporting Student Hall on Arches.pdf"
+PDF_PATH = "/Users/edoardobalducci/Downloads/issue8111.pdf"
 
 
 def main(page: ft.Page):
@@ -236,19 +246,315 @@ def main(page: ft.Page):
         )
 
     # Load document
-    document = PdfDocument("TEST - Supporting Student Hall on Arches.pdf")
+    document = PdfDocument(PDF_PATH)
+    # document = PdfDocument("/Users/edoardobalducci/Downloads/issue8111.pdf")
 
     viewer = PdfViewer(
         source=document,
         scale=1.0,
-        mode=ViewerMode.CONTINUOUS,
+        mode=ViewerMode.SINGLE_PAGE,
         selection_color=COLORS["selection"],
         popup_builder=build_popup,
     )
 
     # State
-    current_mode = ViewerMode.CONTINUOUS
+    current_mode = ViewerMode.SINGLE_PAGE
     drawing_active = [False]  # Use list to allow mutation in nested functions
+    search_visible = [False]  # Search bar visibility
+    shapes_menu_visible = [False]  # Shapes dropdown visibility
+
+    # Text annotation system - annotations that can be selected, moved, and edited
+    # Each annotation: {id, x, y, text, selected, page_index, editing}
+    text_annotations = []  # List of text annotation dicts
+    selected_annotation_id = [None]  # Currently selected annotation ID
+    annotation_counter = [0]  # For generating unique IDs
+    content_stack_ref = ft.Ref[ft.Stack]()
+
+    def create_annotation_id():
+        """Generate a unique annotation ID."""
+        annotation_counter[0] += 1
+        return f"text_ann_{annotation_counter[0]}"
+
+    def add_text_annotation():
+        """Add a new text annotation at default position."""
+        ann_id = create_annotation_id()
+        annotation = {
+            "id": ann_id,
+            "x": 100.0,
+            "y": 100.0,
+            "text": "Text",
+            "page_index": viewer.current_page,
+            "editing": True,  # Start in editing mode
+        }
+        text_annotations.append(annotation)
+        selected_annotation_id[0] = ann_id
+        rebuild_annotations_overlay()
+
+    def get_annotation_by_id(ann_id):
+        """Get annotation by ID."""
+        return next((a for a in text_annotations if a["id"] == ann_id), None)
+
+    def select_annotation(ann_id):
+        """Select an annotation by ID."""
+        selected_annotation_id[0] = ann_id
+        # Set all annotations to not editing
+        for ann in text_annotations:
+            ann["editing"] = False
+        rebuild_annotations_overlay()
+
+    def deselect_all_annotations():
+        """Deselect all annotations."""
+        selected_annotation_id[0] = None
+        for ann in text_annotations:
+            ann["editing"] = False
+        rebuild_annotations_overlay()
+
+    def delete_annotation(ann_id):
+        """Delete an annotation by ID."""
+        text_annotations[:] = [a for a in text_annotations if a["id"] != ann_id]
+        if selected_annotation_id[0] == ann_id:
+            selected_annotation_id[0] = None
+        rebuild_annotations_overlay()
+
+    def confirm_annotation(ann_id):
+        """Save an annotation to the PDF and remove from pending list."""
+        ann = get_annotation_by_id(ann_id)
+        if not ann or not ann["text"].strip():
+            delete_annotation(ann_id)
+            return
+
+        # Convert screen coordinates to PDF coordinates
+        scale = viewer.scale
+        pdf_x = ann["x"] / scale
+        pdf_y = ann["y"] / scale
+
+        # Estimate size based on text length
+        text_width = max(len(ann["text"]) * 8, 50)
+        pdf_width = text_width / scale
+        pdf_height = 20 / scale
+
+        document.add_freetext(
+            page_index=ann["page_index"],
+            rect=(pdf_x, pdf_y, pdf_x + pdf_width, pdf_y + pdf_height),
+            text=ann["text"],
+            font_size=14,
+            text_color=(0.0, 0.0, 0.0),
+            fill_color=None,  # Transparent background
+            border_width=0,
+        )
+        viewer.source = document._get_backend()
+
+        # Remove from pending annotations
+        delete_annotation(ann_id)
+
+        # Deactivate text mode
+        active_shape_type[0] = None
+        rebuild_toolbar()
+        try:
+            rebuild_shapes_toolbar()
+        except NameError:
+            pass
+
+    def build_annotation_widget(ann):
+        """Build a widget for a single text annotation."""
+        is_selected = ann["id"] == selected_annotation_id[0]
+        is_editing = ann.get("editing", False)
+        ann_id = ann["id"]
+
+        def on_drag(e: ft.DragUpdateEvent):
+            """Handle dragging the annotation."""
+            if is_selected and not is_editing:
+                ann["x"] += e.delta_x
+                ann["y"] += e.delta_y
+                rebuild_annotations_overlay()
+
+        def on_click(e):
+            """Select this annotation on click."""
+            select_annotation(ann_id)
+
+        def on_double_tap(e):
+            """Enter edit mode on double-click."""
+            ann["editing"] = True
+            rebuild_annotations_overlay()
+
+        def on_text_change(e):
+            """Update text as user types."""
+            ann["text"] = e.control.value if e.control.value else ""
+
+        def on_text_submit(e):
+            """Exit edit mode on Enter - confirm the annotation."""
+            ann["editing"] = False
+            if ann["text"].strip():
+                confirm_annotation(ann_id)
+            else:
+                delete_annotation(ann_id)
+
+        def on_text_blur(e):
+            """Exit edit mode when losing focus."""
+            ann["editing"] = False
+            rebuild_annotations_overlay()
+
+        def on_confirm(e):
+            """Confirm and save this annotation."""
+            confirm_annotation(ann_id)
+
+        def on_delete(e):
+            """Delete this annotation."""
+            delete_annotation(ann_id)
+
+        handle_size = 10
+
+        if is_selected:
+            if is_editing:
+                # Editing mode - show text field with selection box
+                text_field = ft.TextField(
+                    value=ann["text"],
+                    border=ft.InputBorder.NONE,
+                    text_style=ft.TextStyle(
+                        color="#000000", size=14, weight=ft.FontWeight.BOLD
+                    ),
+                    content_padding=ft.padding.symmetric(horizontal=4, vertical=2),
+                    on_change=on_text_change,
+                    on_submit=on_text_submit,
+                    on_blur=on_text_blur,
+                    autofocus=True,
+                    width=150,
+                )
+                inner_content = text_field
+            else:
+                # Selected but not editing - show text
+                inner_content = ft.Text(
+                    ann["text"],
+                    size=14,
+                    color="#000000",
+                    weight=ft.FontWeight.BOLD,
+                )
+
+            # Build selection box with corner handles
+            inner = ft.Stack(
+                [
+                    # Main text container with border
+                    ft.Container(
+                        content=inner_content,
+                        padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                        border=ft.border.all(1.5, "#1976d2"),
+                    ),
+                    # Corner handles (blue circles)
+                    ft.Container(  # Top-left
+                        width=handle_size,
+                        height=handle_size,
+                        bgcolor="#1976d2",
+                        border_radius=handle_size // 2,
+                        left=-handle_size // 2,
+                        top=-handle_size // 2,
+                    ),
+                    ft.Container(  # Top-right
+                        width=handle_size,
+                        height=handle_size,
+                        bgcolor="#1976d2",
+                        border_radius=handle_size // 2,
+                        right=-handle_size // 2,
+                        top=-handle_size // 2,
+                    ),
+                    ft.Container(  # Bottom-left
+                        width=handle_size,
+                        height=handle_size,
+                        bgcolor="#1976d2",
+                        border_radius=handle_size // 2,
+                        left=-handle_size // 2,
+                        bottom=-handle_size // 2,
+                    ),
+                    ft.Container(  # Bottom-right
+                        width=handle_size,
+                        height=handle_size,
+                        bgcolor="#1976d2",
+                        border_radius=handle_size // 2,
+                        right=-handle_size // 2,
+                        bottom=-handle_size // 2,
+                    ),
+                    # Action buttons above the box
+                    ft.Container(
+                        content=ft.Row(
+                            [
+                                ft.Container(
+                                    content=ft.Icon(
+                                        ft.Icons.CHECK, size=14, color="#ffffff"
+                                    ),
+                                    width=24,
+                                    height=24,
+                                    bgcolor="#22c55e",
+                                    border_radius=4,
+                                    alignment=ft.alignment.center,
+                                    on_click=on_confirm,
+                                    tooltip="Confirm (Enter)",
+                                ),
+                                ft.Container(
+                                    content=ft.Icon(
+                                        ft.Icons.DELETE, size=14, color="#ffffff"
+                                    ),
+                                    width=24,
+                                    height=24,
+                                    bgcolor="#ef4444",
+                                    border_radius=4,
+                                    alignment=ft.alignment.center,
+                                    on_click=on_delete,
+                                    tooltip="Delete",
+                                ),
+                            ],
+                            spacing=4,
+                        ),
+                        top=-32,
+                        left=0,
+                    ),
+                ],
+            )
+
+            widget = ft.GestureDetector(
+                content=inner,
+                on_pan_update=on_drag,
+                on_double_tap=on_double_tap,
+            )
+        else:
+            # Not selected - just show plain text, clickable to select
+            widget = ft.GestureDetector(
+                content=ft.Container(
+                    content=ft.Text(
+                        ann["text"],
+                        size=14,
+                        color="#000000",
+                        weight=ft.FontWeight.BOLD,
+                    ),
+                    padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                ),
+                on_tap=on_click,
+            )
+
+        # Position the widget
+        return ft.Container(
+            content=widget,
+            left=ann["x"],
+            top=ann["y"],
+        )
+
+    def rebuild_annotations_overlay():
+        """Rebuild the annotations overlay."""
+        if not content_stack_ref.current:
+            return
+
+        # Keep only the first control (the main content column)
+        controls = content_stack_ref.current.controls
+        content_stack_ref.current.controls = controls[:1]
+
+        # Add annotation widgets for current page
+        current_page = viewer.current_page
+        for ann in text_annotations:
+            if ann["page_index"] == current_page:
+                widget = build_annotation_widget(ann)
+                content_stack_ref.current.controls.append(widget)
+
+        content_stack_ref.current.update()
+
+    active_shape_type = [None]  # Currently active shape drawing mode
 
     # Page indicator
     page_text = ft.Text(
@@ -283,6 +589,135 @@ def main(page: ft.Page):
     def on_zoom_out(e):
         viewer.zoom_out()
 
+    # Search functionality
+    search_field_ref = ft.Ref[ft.TextField]()
+    search_results_text = ft.Text(
+        "",
+        size=12,
+        color=COLORS["text_muted"],
+    )
+
+    def on_search_change(e):
+        """Perform search as user types."""
+        query = e.control.value
+        if query:
+            results = viewer.search(query)
+            if results:
+                search_results_text.value = (
+                    f"{viewer.current_search_index + 1}/{len(results)}"
+                )
+            else:
+                search_results_text.value = "0/0"
+        else:
+            viewer.clear_search()
+            search_results_text.value = ""
+        if search_results_text.page:
+            search_results_text.update()
+
+    def on_search_submit(e):
+        """Go to next result on Enter."""
+        if viewer.search_result_count > 0:
+            viewer.search_next()
+            search_results_text.value = (
+                f"{viewer.current_search_index + 1}/{viewer.search_result_count}"
+            )
+            if search_results_text.page:
+                search_results_text.update()
+            update_page_info()
+
+    def on_search_next(e):
+        """Go to next search result."""
+        if viewer.search_result_count > 0:
+            viewer.search_next()
+            search_results_text.value = (
+                f"{viewer.current_search_index + 1}/{viewer.search_result_count}"
+            )
+            if search_results_text.page:
+                search_results_text.update()
+            update_page_info()
+
+    def on_search_prev(e):
+        """Go to previous search result."""
+        if viewer.search_result_count > 0:
+            viewer.search_prev()
+            search_results_text.value = (
+                f"{viewer.current_search_index + 1}/{viewer.search_result_count}"
+            )
+            if search_results_text.page:
+                search_results_text.update()
+            update_page_info()
+
+    def on_search_close(e):
+        """Close search bar."""
+        search_visible[0] = False
+        viewer.clear_search()
+        if search_field_ref.current:
+            search_field_ref.current.value = ""
+        search_results_text.value = ""
+        rebuild_toolbar()
+
+    def toggle_search(e):
+        """Toggle search bar visibility."""
+        search_visible[0] = not search_visible[0]
+        rebuild_toolbar()
+        # Focus the search field when opened
+        if search_visible[0] and search_field_ref.current:
+            search_field_ref.current.focus()
+
+    # Shape annotation functions
+    def enable_shape_mode(shape_type: str):
+        """Enable interactive shape drawing mode."""
+        # Disable ink drawing if active
+        if drawing_active[0]:
+            drawing_active[0] = False
+            viewer.disable_drawing()
+
+        # For all shapes (including text), enable interactive drawing mode
+        # If clicking the same shape type, toggle it off
+        if active_shape_type[0] == shape_type:
+            active_shape_type[0] = None
+            viewer.disable_shape_drawing()
+        else:
+            active_shape_type[0] = shape_type
+            if shape_type == "rect":
+                viewer.enable_rectangle_drawing(
+                    stroke_color=(0.8, 0.2, 0.2),  # Red
+                    fill_color=None,
+                    stroke_width=2,
+                )
+            elif shape_type == "circle":
+                viewer.enable_circle_drawing(
+                    stroke_color=(0.2, 0.2, 0.8),  # Blue
+                    fill_color=None,
+                    stroke_width=2,
+                )
+            elif shape_type == "line":
+                viewer.enable_line_drawing(
+                    color=(0.0, 0.0, 0.0),
+                    width=2,
+                )
+            elif shape_type == "arrow":
+                viewer.enable_arrow_drawing(
+                    color=(0.0, 0.5, 0.0),  # Green
+                    width=2,
+                )
+            elif shape_type == "text":
+                # Add a new text annotation
+                add_text_annotation()
+
+        rebuild_toolbar()
+        rebuild_shapes_toolbar()
+
+    def toggle_shapes_menu(e):
+        """Toggle shapes toolbar visibility."""
+        shapes_menu_visible[0] = not shapes_menu_visible[0]
+        rebuild_toolbar()
+        # Also rebuild shapes toolbar if it exists
+        try:
+            rebuild_shapes_toolbar()
+        except NameError:
+            pass
+
     save_icon_ref = ft.Ref[ft.Icon]()
 
     def on_save(e):
@@ -309,10 +744,18 @@ def main(page: ft.Page):
     def on_toggle_draw(e):
         drawing_active[0] = not drawing_active[0]
         if drawing_active[0]:
+            # Disable shape drawing if active
+            if active_shape_type[0]:
+                active_shape_type[0] = None
+                viewer.disable_shape_drawing()
             viewer.enable_drawing(color=(0.2, 0.2, 0.8), width=2.0)
         else:
             viewer.disable_drawing()
         rebuild_toolbar()
+        try:
+            rebuild_shapes_toolbar()
+        except NameError:
+            pass
 
     # Minimal icon button
     def icon_btn(icon, on_click, tooltip=None):
@@ -495,7 +938,7 @@ def main(page: ft.Page):
         toolbar_row.current.update()
 
     def build_toolbar_controls():
-        return [
+        controls = [
             # ToC toggle button (left side)
             ft.Container(
                 content=ft.Container(
@@ -522,8 +965,122 @@ def main(page: ft.Page):
                 padding=4,
                 tooltip="Table of Contents",
             ),
-            ft.Container(expand=True),
-            # Save button
+        ]
+
+        # Search bar (shown when search is active)
+        if search_visible[0]:
+            controls.append(
+                ft.Container(
+                    content=ft.Row(
+                        [
+                            ft.Icon(
+                                ft.Icons.SEARCH,
+                                size=16,
+                                color=COLORS["text_muted"],
+                            ),
+                            ft.TextField(
+                                ref=search_field_ref,
+                                hint_text="Search...",
+                                hint_style=ft.TextStyle(
+                                    color=COLORS["text_muted"], size=13
+                                ),
+                                text_style=ft.TextStyle(color=COLORS["text"], size=13),
+                                border=ft.InputBorder.NONE,
+                                height=32,
+                                width=180,
+                                content_padding=ft.padding.only(
+                                    left=8, right=8, bottom=8
+                                ),
+                                on_change=on_search_change,
+                                on_submit=on_search_submit,
+                                autofocus=True,
+                            ),
+                            search_results_text,
+                            ft.Container(
+                                width=1,
+                                height=20,
+                                bgcolor=COLORS["border"],
+                                margin=ft.margin.symmetric(horizontal=4),
+                            ),
+                            ft.Container(
+                                content=ft.Icon(
+                                    ft.Icons.KEYBOARD_ARROW_UP,
+                                    size=16,
+                                    color=COLORS["text_secondary"],
+                                ),
+                                width=28,
+                                height=28,
+                                border_radius=4,
+                                alignment=ft.alignment.center,
+                                on_click=on_search_prev,
+                                tooltip="Previous (Shift+Enter)",
+                            ),
+                            ft.Container(
+                                content=ft.Icon(
+                                    ft.Icons.KEYBOARD_ARROW_DOWN,
+                                    size=16,
+                                    color=COLORS["text_secondary"],
+                                ),
+                                width=28,
+                                height=28,
+                                border_radius=4,
+                                alignment=ft.alignment.center,
+                                on_click=on_search_next,
+                                tooltip="Next (Enter)",
+                            ),
+                            ft.Container(
+                                content=ft.Icon(
+                                    ft.Icons.CLOSE,
+                                    size=16,
+                                    color=COLORS["text_secondary"],
+                                ),
+                                width=28,
+                                height=28,
+                                border_radius=4,
+                                alignment=ft.alignment.center,
+                                on_click=on_search_close,
+                                tooltip="Close (Esc)",
+                            ),
+                        ],
+                        spacing=4,
+                        vertical_alignment=ft.CrossAxisAlignment.CENTER,
+                    ),
+                    bgcolor=COLORS["surface"],
+                    border=ft.border.all(1, COLORS["selection"]),
+                    border_radius=8,
+                    padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                    margin=ft.margin.only(left=8),
+                )
+            )
+        else:
+            # Search button (when search is hidden)
+            controls.append(
+                ft.Container(
+                    content=ft.Container(
+                        content=ft.Icon(
+                            ft.Icons.SEARCH,
+                            size=16,
+                            color=COLORS["text_secondary"],
+                        ),
+                        width=32,
+                        height=32,
+                        border_radius=6,
+                        alignment=ft.alignment.center,
+                        on_click=toggle_search,
+                    ),
+                    bgcolor=COLORS["surface"],
+                    border=ft.border.all(1, COLORS["border"]),
+                    border_radius=8,
+                    padding=4,
+                    margin=ft.margin.only(left=8),
+                    tooltip="Search (Ctrl+F)",
+                )
+            )
+
+        controls.append(ft.Container(expand=True))
+
+        # Save button
+        controls.append(
             ft.Container(
                 content=ft.Container(
                     content=ft.Icon(
@@ -543,8 +1100,11 @@ def main(page: ft.Page):
                 border_radius=8,
                 padding=4,
                 tooltip="Save document",
-            ),
-            # Mode selector
+            )
+        )
+
+        # Mode selector
+        controls.append(
             ft.Container(
                 content=ft.Row(
                     [
@@ -571,8 +1131,11 @@ def main(page: ft.Page):
                 border_radius=8,
                 padding=4,
                 margin=ft.margin.only(left=8),
-            ),
-            # Navigation
+            )
+        )
+
+        # Navigation
+        controls.append(
             ft.Container(
                 content=ft.Row(
                     [
@@ -590,8 +1153,11 @@ def main(page: ft.Page):
                 border_radius=8,
                 padding=4,
                 margin=ft.margin.only(left=8),
-            ),
-            # Zoom
+            )
+        )
+
+        # Zoom
+        controls.append(
             ft.Container(
                 content=ft.Row(
                     [
@@ -605,8 +1171,11 @@ def main(page: ft.Page):
                 border_radius=8,
                 padding=4,
                 margin=ft.margin.only(left=8),
-            ),
-            # Draw toggle
+            )
+        )
+
+        # Draw toggle
+        controls.append(
             ft.Container(
                 content=ft.Container(
                     content=ft.Icon(
@@ -634,9 +1203,191 @@ def main(page: ft.Page):
                 padding=4,
                 margin=ft.margin.only(left=8),
                 tooltip="Draw mode",
+            )
+        )
+
+        # Shapes toggle button
+        controls.append(
+            ft.Container(
+                content=ft.Icon(
+                    ft.Icons.CATEGORY_OUTLINED,
+                    size=16,
+                    color=COLORS["text"]
+                    if shapes_menu_visible[0]
+                    else COLORS["text_secondary"],
+                ),
+                width=40,
+                height=40,
+                border_radius=8,
+                alignment=ft.alignment.center,
+                on_click=toggle_shapes_menu,
+                bgcolor=COLORS["surface"],
+                border=ft.border.all(
+                    1,
+                    COLORS["selection"] if shapes_menu_visible[0] else COLORS["border"],
+                ),
+                margin=ft.margin.only(left=8),
+                tooltip="Shapes & Text",
+            )
+        )
+
+        controls.append(ft.Container(expand=True))
+
+        # Info button (right side)
+        controls.append(
+            ft.Container(
+                content=ft.Container(
+                    content=ft.Icon(
+                        ft.Icons.INFO_OUTLINE,
+                        size=16,
+                        color=COLORS["text_secondary"],
+                    ),
+                    width=32,
+                    height=32,
+                    border_radius=6,
+                    alignment=ft.alignment.center,
+                    on_click=show_pdf_info,
+                ),
+                bgcolor=COLORS["surface"],
+                border=ft.border.all(1, COLORS["border"]),
+                border_radius=8,
+                padding=4,
+                tooltip="PDF Information",
+            )
+        )
+
+        return controls
+
+    def show_pdf_info(e):
+        """Show PDF information in a dialog."""
+        import os
+
+        # Get file info
+        file_path = PDF_PATH
+        file_size = "Unknown"
+        try:
+            size_bytes = os.path.getsize(file_path)
+            if size_bytes < 1024:
+                file_size = f"{size_bytes} B"
+            elif size_bytes < 1024 * 1024:
+                file_size = f"{size_bytes / 1024:.1f} KB"
+            else:
+                file_size = f"{size_bytes / (1024 * 1024):.1f} MB"
+        except Exception:
+            pass
+
+        # Get metadata
+        metadata = document.metadata
+        page_width, page_height = document.get_page_size(0)
+
+        # Get permissions
+        permissions = document.permissions
+
+        def info_row(label: str, value: str):
+            return ft.Row(
+                [
+                    ft.Text(label, size=12, color=COLORS["text_muted"], width=120),
+                    ft.Text(
+                        value or "N/A",
+                        size=12,
+                        color=COLORS["text"],
+                        expand=True,
+                        overflow=ft.TextOverflow.ELLIPSIS,
+                    ),
+                ],
+                spacing=8,
+            )
+
+        def section_header(title: str):
+            return ft.Container(
+                content=ft.Text(
+                    title,
+                    size=13,
+                    color=COLORS["text"],
+                    weight=ft.FontWeight.W_600,
+                ),
+                padding=ft.padding.only(top=16, bottom=8),
+            )
+
+        def permission_chip(name: str, allowed: bool):
+            return ft.Container(
+                content=ft.Row(
+                    [
+                        ft.Icon(
+                            ft.Icons.CHECK_CIRCLE if allowed else ft.Icons.CANCEL,
+                            size=14,
+                            color="#22c55e" if allowed else "#ef4444",
+                        ),
+                        ft.Text(name, size=12, color=COLORS["text"]),
+                    ],
+                    spacing=4,
+                ),
+                padding=ft.padding.symmetric(horizontal=8, vertical=4),
+                border_radius=4,
+                bgcolor=COLORS["surface_hover"],
+            )
+
+        # Build content
+        content = ft.Column(
+            [
+                # General Info
+                section_header("General Information"),
+                info_row("File Name", os.path.basename(file_path)),
+                info_row("File Size", file_size),
+                info_row("Pages", str(document.page_count)),
+                info_row("Page Size", f"{page_width:.0f} x {page_height:.0f} pts"),
+                info_row("Encrypted", "Yes" if document.is_encrypted else "No"),
+                # Metadata
+                section_header("Document Metadata"),
+                info_row("Title", metadata.get("title", "")),
+                info_row("Author", metadata.get("author", "")),
+                info_row("Subject", metadata.get("subject", "")),
+                info_row("Creator", metadata.get("creator", "")),
+                info_row("Producer", metadata.get("producer", "")),
+                info_row("Creation Date", metadata.get("creationDate", "")),
+                info_row("Modification Date", metadata.get("modDate", "")),
+                # Permissions
+                section_header("Permissions"),
+                ft.Row(
+                    [
+                        permission_chip("Print", permissions.get("print", False)),
+                        permission_chip("Copy", permissions.get("copy", False)),
+                        permission_chip("Modify", permissions.get("modify", False)),
+                        permission_chip("Annotate", permissions.get("annotate", False)),
+                    ],
+                    spacing=8,
+                    wrap=True,
+                ),
+            ],
+            spacing=4,
+            scroll=ft.ScrollMode.AUTO,
+        )
+
+        def close_dialog(e):
+            dialog.open = False
+            page.update()
+
+        dialog = ft.AlertDialog(
+            title=ft.Row(
+                [
+                    ft.Icon(ft.Icons.PICTURE_AS_PDF, color="#ffffff", size=24),
+                    ft.Text("PDF Information", color=COLORS["text"]),
+                ],
+                spacing=8,
             ),
-            ft.Container(expand=True),
-        ]
+            bgcolor=COLORS["surface"],
+            content=ft.Container(
+                content=content,
+                width=400,
+                height=400,
+            ),
+            actions=[
+                ft.TextButton("Close", on_click=close_dialog),
+            ],
+        )
+        page.overlay.append(dialog)
+        dialog.open = True
+        page.update()
 
     # Toolbar
     toolbar = ft.Container(
@@ -648,6 +1399,100 @@ def main(page: ft.Page):
         padding=ft.padding.symmetric(horizontal=24, vertical=12),
         border=ft.border.only(bottom=ft.BorderSide(1, COLORS["border"])),
     )
+
+    # Shapes toolbar (shown when shapes button is clicked)
+    shapes_toolbar_ref = ft.Ref[ft.Container]()
+
+    def build_shapes_toolbar():
+        """Build the shapes toolbar row."""
+
+        def shape_btn(icon, label, shape_type):
+            """Create a shape button."""
+            is_active = active_shape_type[0] == shape_type
+
+            def on_hover(e):
+                if not is_active:
+                    e.control.bgcolor = (
+                        COLORS["surface_hover"] if e.data == "true" else "transparent"
+                    )
+                    if e.control.page:
+                        e.control.update()
+
+            return ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Icon(
+                            icon,
+                            size=20,
+                            color=COLORS["text"]
+                            if is_active
+                            else COLORS["text_secondary"],
+                        ),
+                        ft.Text(
+                            label,
+                            size=11,
+                            color=COLORS["text"] if is_active else COLORS["text_muted"],
+                        ),
+                    ],
+                    spacing=4,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                ),
+                width=70,
+                height=56,
+                border_radius=8,
+                alignment=ft.alignment.center,
+                bgcolor=COLORS["surface_hover"] if is_active else "transparent",
+                border=ft.border.all(1, COLORS["selection"]) if is_active else None,
+                on_click=lambda e, st=shape_type: enable_shape_mode(st),
+                on_hover=on_hover,
+            )
+
+        return [
+            ft.Container(width=24),  # Spacer
+            shape_btn(ft.Icons.TEXT_FIELDS, "Text", "text"),
+            shape_btn(ft.Icons.RECTANGLE_OUTLINED, "Rectangle", "rect"),
+            shape_btn(ft.Icons.CIRCLE_OUTLINED, "Circle", "circle"),
+            shape_btn(ft.Icons.HORIZONTAL_RULE, "Line", "line"),
+            shape_btn(ft.Icons.ARROW_FORWARD, "Arrow", "arrow"),
+            ft.Container(expand=True),
+            # Close button
+            ft.Container(
+                content=ft.Icon(ft.Icons.CLOSE, size=16, color=COLORS["text_muted"]),
+                width=32,
+                height=32,
+                border_radius=6,
+                alignment=ft.alignment.center,
+                on_click=toggle_shapes_menu,
+                tooltip="Close",
+            ),
+            ft.Container(width=24),  # Spacer
+        ]
+
+    shapes_toolbar_row_ref = ft.Ref[ft.Row]()
+
+    shapes_toolbar = ft.Container(
+        content=ft.Row(
+            build_shapes_toolbar(),
+            ref=shapes_toolbar_row_ref,
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        bgcolor=COLORS["surface"],
+        padding=ft.padding.symmetric(vertical=8),
+        border=ft.border.only(bottom=ft.BorderSide(1, COLORS["border"])),
+        visible=shapes_menu_visible[0],
+        ref=shapes_toolbar_ref,
+    )
+
+    def rebuild_shapes_toolbar():
+        """Rebuild the shapes toolbar."""
+        if shapes_toolbar_ref.current:
+            shapes_toolbar_ref.current.visible = shapes_menu_visible[0]
+        if shapes_toolbar_row_ref.current:
+            shapes_toolbar_row_ref.current.controls = build_shapes_toolbar()
+        if shapes_toolbar_ref.current and shapes_toolbar_ref.current.page:
+            shapes_toolbar_ref.current.update()
 
     # ToC Sidebar
     toc_sidebar = ft.Container(
@@ -685,18 +1530,25 @@ def main(page: ft.Page):
         visible=False,
     )
 
-    # Content area with scroll
+    # Content area with scroll - wrapped in Stack to allow floating text box overlay
     content = ft.Container(
-        content=ft.Column(
+        content=ft.Stack(
             [
-                ft.Container(
-                    content=viewer.control,
-                    alignment=ft.alignment.top_center,
-                    padding=32,
+                ft.Column(
+                    [
+                        ft.Container(
+                            content=viewer.control,
+                            alignment=ft.alignment.top_center,
+                            padding=32,
+                        ),
+                    ],
+                    scroll=ft.ScrollMode.AUTO,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    expand=True,
                 ),
+                # Floating text boxes will be added here dynamically
             ],
-            scroll=ft.ScrollMode.AUTO,
-            horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+            ref=content_stack_ref,
             expand=True,
         ),
         bgcolor=COLORS["bg"],
@@ -716,7 +1568,7 @@ def main(page: ft.Page):
     # Layout
     page.add(
         ft.Column(
-            [toolbar, main_content],
+            [toolbar, shapes_toolbar, main_content],
             spacing=0,
             expand=True,
         )

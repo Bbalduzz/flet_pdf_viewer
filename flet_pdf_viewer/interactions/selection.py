@@ -131,7 +131,9 @@ class SelectionHandler:
             char_x2 = char_x1 + char.width
             char_y2 = char_y1 + char.height
 
-            if self._rects_intersect(x1, y1, x2, y2, char_x1, char_y1, char_x2, char_y2):
+            if self._rects_intersect(
+                x1, y1, x2, y2, char_x1, char_y1, char_x2, char_y2
+            ):
                 directly_selected.append(char)
 
         if not directly_selected:

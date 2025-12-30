@@ -22,7 +22,15 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Union
 
 from .backends.pymupdf import PyMuPDFBackend
-from .types import Color, TocItem, ViewerMode
+from .types import (
+    Color,
+    LineEndStyle,
+    SearchOptions,
+    SearchResult,
+    ShapeType,
+    TocItem,
+    ViewerMode,
+)
 from .viewer import PdfViewer
 
 __version__ = "0.1.0"
@@ -176,6 +184,174 @@ class PdfDocument:
         page = self._backend.get_page(page_index)
         page.add_ink(paths, color, width)
 
+    # Shape annotations
+
+    def add_freetext(
+        self,
+        page_index: int,
+        rect: Tuple[float, float, float, float],
+        text: str,
+        font_size: float = 12.0,
+        font_name: str = "helv",
+        text_color: Color = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        border_color: Optional[Color] = None,
+        border_width: float = 0.0,
+        align: int = 0,
+    ) -> None:
+        """Add free text annotation (text box).
+
+        Args:
+            page_index: Page number (0-based)
+            rect: Bounding rectangle (x0, y0, x1, y1)
+            text: The text content
+            font_size: Font size in points (default: 12)
+            font_name: Font name - helv, tiro, cour (default: helv)
+            text_color: Text color RGB tuple (default: black)
+            fill_color: Background fill color (None for transparent)
+            border_color: Border color (None for no border)
+            border_width: Border width (default: 0)
+            align: Text alignment - 0=left, 1=center, 2=right (default: 0)
+        """
+        page = self._backend.get_page(page_index)
+        page.add_freetext(
+            rect,
+            text,
+            font_size,
+            font_name,
+            text_color,
+            fill_color,
+            border_color,
+            border_width,
+            align,
+        )
+
+    def add_rect(
+        self,
+        page_index: int,
+        rect: Tuple[float, float, float, float],
+        stroke_color: Optional[Color] = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        width: float = 1.0,
+    ) -> None:
+        """Add rectangle annotation.
+
+        Args:
+            page_index: Page number (0-based)
+            rect: Rectangle coordinates (x0, y0, x1, y1)
+            stroke_color: Border color (None for no border)
+            fill_color: Fill color (None for no fill)
+            width: Border width (default: 1)
+        """
+        page = self._backend.get_page(page_index)
+        page.add_rect(rect, stroke_color, fill_color, width)
+
+    def add_circle(
+        self,
+        page_index: int,
+        rect: Tuple[float, float, float, float],
+        stroke_color: Optional[Color] = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        width: float = 1.0,
+    ) -> None:
+        """Add circle/ellipse annotation.
+
+        Args:
+            page_index: Page number (0-based)
+            rect: Bounding rectangle for the ellipse (x0, y0, x1, y1)
+            stroke_color: Border color (None for no border)
+            fill_color: Fill color (None for no fill)
+            width: Border width (default: 1)
+        """
+        page = self._backend.get_page(page_index)
+        page.add_circle(rect, stroke_color, fill_color, width)
+
+    def add_line(
+        self,
+        page_index: int,
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        color: Color = (0.0, 0.0, 0.0),
+        width: float = 1.0,
+        start_style: LineEndStyle = LineEndStyle.NONE,
+        end_style: LineEndStyle = LineEndStyle.NONE,
+    ) -> None:
+        """Add line annotation.
+
+        Args:
+            page_index: Page number (0-based)
+            start: Start point (x, y)
+            end: End point (x, y)
+            color: Line color (default: black)
+            width: Line width (default: 1)
+            start_style: Line ending style at start
+            end_style: Line ending style at end
+        """
+        page = self._backend.get_page(page_index)
+        page.add_line(start, end, color, width, start_style, end_style)
+
+    def add_arrow(
+        self,
+        page_index: int,
+        start: Tuple[float, float],
+        end: Tuple[float, float],
+        color: Color = (0.0, 0.0, 0.0),
+        width: float = 1.0,
+    ) -> None:
+        """Add arrow annotation (line with arrow head at end).
+
+        Args:
+            page_index: Page number (0-based)
+            start: Start point (x, y)
+            end: End point (x, y) - arrow head here
+            color: Line color (default: black)
+            width: Line width (default: 1)
+        """
+        page = self._backend.get_page(page_index)
+        page.add_arrow(start, end, color, width)
+
+    def add_polygon(
+        self,
+        page_index: int,
+        points: List[Tuple[float, float]],
+        stroke_color: Optional[Color] = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        width: float = 1.0,
+    ) -> None:
+        """Add polygon annotation (closed shape).
+
+        Args:
+            page_index: Page number (0-based)
+            points: List of vertices [(x1,y1), (x2,y2), ...]
+            stroke_color: Border color
+            fill_color: Fill color
+            width: Border width (default: 1)
+        """
+        page = self._backend.get_page(page_index)
+        page.add_polygon(points, stroke_color, fill_color, width)
+
+    def add_polyline(
+        self,
+        page_index: int,
+        points: List[Tuple[float, float]],
+        color: Color = (0.0, 0.0, 0.0),
+        width: float = 1.0,
+        start_style: LineEndStyle = LineEndStyle.NONE,
+        end_style: LineEndStyle = LineEndStyle.NONE,
+    ) -> None:
+        """Add polyline annotation (connected line segments).
+
+        Args:
+            page_index: Page number (0-based)
+            points: List of vertices [(x1,y1), (x2,y2), ...]
+            color: Line color (default: black)
+            width: Line width (default: 1)
+            start_style: Line ending style at start
+            end_style: Line ending style at end
+        """
+        page = self._backend.get_page(page_index)
+        page.add_polyline(points, color, width, start_style, end_style)
+
     def save(self, path: Optional[Union[str, Path]] = None) -> None:
         """Save the document."""
         self._backend.save(path)
@@ -213,6 +389,10 @@ __all__ = [
     "PdfDocument",
     "PdfViewer",
     "ViewerMode",
+    "ShapeType",
     "TocItem",
+    "SearchResult",
+    "SearchOptions",
+    "LineEndStyle",
     "__version__",
 ]

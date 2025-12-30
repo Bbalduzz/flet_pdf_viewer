@@ -367,10 +367,45 @@ class PageRenderer:
             )
         )
 
+    def _catmull_rom_to_bezier(
+        self, points: List[Tuple[float, float]], scale: float = 1.0, tension: float = 0.5
+    ) -> List:
+        """Convert points to smooth path using Catmull-Rom splines converted to cubic beziers."""
+        if len(points) < 2:
+            return []
+
+        scaled = [(p[0] * scale, p[1] * scale) for p in points]
+
+        if len(scaled) == 2:
+            return [
+                cv.Path.MoveTo(scaled[0][0], scaled[0][1]),
+                cv.Path.LineTo(scaled[1][0], scaled[1][1]),
+            ]
+
+        # Duplicate first and last points for the spline
+        pts = [scaled[0]] + scaled + [scaled[-1]]
+
+        elements = [cv.Path.MoveTo(scaled[0][0], scaled[0][1])]
+
+        # Convert each Catmull-Rom segment to cubic bezier
+        for i in range(1, len(pts) - 2):
+            p0, p1, p2, p3 = pts[i - 1], pts[i], pts[i + 1], pts[i + 2]
+
+            # Calculate control points for cubic bezier
+            # Using tension parameter (0.5 = standard Catmull-Rom)
+            cp1x = p1[0] + (p2[0] - p0[0]) * tension / 3
+            cp1y = p1[1] + (p2[1] - p0[1]) * tension / 3
+            cp2x = p2[0] - (p3[0] - p1[0]) * tension / 3
+            cp2y = p2[1] - (p3[1] - p1[1]) * tension / 3
+
+            elements.append(cv.Path.CubicTo(cp1x, cp1y, cp2x, cp2y, p2[0], p2[1]))
+
+        return elements
+
     def _render_ink(
         self, annot: AnnotationInfo, color: str, shapes: List[Any]
     ) -> None:
-        """Render ink annotation."""
+        """Render ink annotation with Catmull-Rom splines."""
         if not annot.vertices:
             return
 
@@ -378,22 +413,19 @@ class PageRenderer:
 
         for path in annot.vertices:
             if len(path) >= 2:
-                for i in range(len(path) - 1):
-                    p1 = path[i]
-                    p2 = path[i + 1]
-                    shapes.append(
-                        cv.Line(
-                            x1=p1[0] * self.scale,
-                            y1=p1[1] * self.scale,
-                            x2=p2[0] * self.scale,
-                            y2=p2[1] * self.scale,
-                            paint=ft.Paint(
-                                stroke_width=stroke_width * self.scale,
-                                color=color,
-                                stroke_cap=ft.StrokeCap.ROUND,
-                            ),
-                        )
+                elements = self._catmull_rom_to_bezier(path, self.scale)
+                shapes.append(
+                    cv.Path(
+                        elements,
+                        paint=ft.Paint(
+                            stroke_width=stroke_width * self.scale,
+                            color=color,
+                            style=ft.PaintingStyle.STROKE,
+                            stroke_cap=ft.StrokeCap.ROUND,
+                            stroke_join=ft.StrokeJoin.ROUND,
+                        ),
                     )
+                )
 
     def _render_text(self, page: PageBackend, shapes: List[Any]) -> None:
         """Render text blocks."""

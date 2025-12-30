@@ -63,9 +63,14 @@ class DrawingHandler:
         if self._state.enabled:
             self._state.current_path = [(x, y)]
 
-    def add_point(self, x: float, y: float) -> None:
-        """Add a point to the current stroke."""
-        if self._state.enabled:
+    def add_point(self, x: float, y: float, min_distance: float = 5.0) -> None:
+        """Add a point to the current stroke if far enough from last point."""
+        if self._state.enabled and self._state.current_path:
+            last_x, last_y = self._state.current_path[-1]
+            dist = ((x - last_x) ** 2 + (y - last_y) ** 2) ** 0.5
+            if dist >= min_distance:
+                self._state.current_path.append((x, y))
+        elif self._state.enabled:
             self._state.current_path.append((x, y))
 
     def end_stroke(self) -> Path:

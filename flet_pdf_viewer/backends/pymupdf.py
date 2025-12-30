@@ -22,11 +22,14 @@ from ..types import (  # noqa: E402
     GraphicsInfo,
     ImageInfo,
     LinearGradient,
+    LineEndStyle,
     LinkInfo,
     OutlineItem,
     PageInfo,
+    Point,
     RadialGradient,
     Rect,
+    SearchResult,
     TextBlock,
 )
 from ..types import (
@@ -94,9 +97,9 @@ class PyMuPDFPage(PageBackend):
         self._doc = doc
         self._page = page
         self._index = index
-        self._shadings: Optional[
-            Dict[str, Union[LinearGradient, RadialGradient]]
-        ] = None
+        self._shadings: Optional[Dict[str, Union[LinearGradient, RadialGradient]]] = (
+            None
+        )
         self._text_gradient: Optional[Union[LinearGradient, RadialGradient]] = None
 
     def _extract_shadings(self) -> Dict[str, Union[LinearGradient, RadialGradient]]:
@@ -559,6 +562,101 @@ class PyMuPDFPage(PageBackend):
 
         return graphics
 
+    def _detect_soft_mask_compositing(
+        self, drawings: list
+    ) -> Tuple[set, dict]:
+        """Detect soft mask compositing patterns and determine correct rendering.
+
+        PDFs use soft masks (SMask) for transparency compositing. A common pattern:
+        - Colored background path
+        - Black/white rectangles (compositing artifacts)
+        - Black filled path (the mask shape, should render as white)
+        - More white rectangles
+
+        Returns:
+            skip_indices: Set of drawing indices to skip (mask constructs)
+            color_overrides: Dict mapping index -> new fill color
+        """
+        skip_indices = set()
+        color_overrides = {}
+
+        # Find colored backgrounds (non-black, non-white, non-gray fills)
+        colored_backgrounds = []
+        for i, d in enumerate(drawings):
+            fill = d.get("fill")
+            if fill and len(d.get("items", [])) > 1:  # Complex path (not simple rect)
+                # Check if it's a "colorful" fill (not grayscale)
+                r, g, b = fill
+                if not (r == g == b) or (r > 0.3 and r < 0.9):  # Has color or mid-gray
+                    colored_backgrounds.append((i, d))
+
+        for bg_idx, bg_drawing in colored_backgrounds:
+            bg_rect = bg_drawing.get("rect")
+            if not bg_rect:
+                continue
+
+            # Look for soft mask pattern in subsequent drawings
+            # Pattern: black rect -> white rect -> black path -> white rect
+            # within the background's bounding box
+            mask_candidates = []
+            for j in range(bg_idx + 1, min(bg_idx + 10, len(drawings))):
+                d = drawings[j]
+                rect = d.get("rect")
+                if not rect:
+                    continue
+
+                # Check if this drawing is inside/overlapping the background
+                if not (
+                    rect.x0 < bg_rect.x1
+                    and rect.x1 > bg_rect.x0
+                    and rect.y0 < bg_rect.y1
+                    and rect.y1 > bg_rect.y0
+                ):
+                    continue
+
+                fill = d.get("fill")
+                items = d.get("items", [])
+                is_rect = len(items) == 1 and items[0][0] == "re"
+                is_path = len(items) > 1
+
+                if fill == (1.0, 1.0, 1.0) and is_rect:
+                    # White rect - likely mask construct
+                    mask_candidates.append(("white_rect", j))
+                elif fill == (0.0, 0.0, 0.0) and is_rect:
+                    # Black rect - border or shadow
+                    mask_candidates.append(("black_rect", j))
+                elif fill == (0.0, 0.0, 0.0) and is_path:
+                    # Black path - could be the mask shape (checkmark, icon, etc.)
+                    mask_candidates.append(("black_path", j))
+
+            # Detect the compositing pattern:
+            # black_rect -> white_rect -> black_path -> white_rect
+            if len(mask_candidates) >= 3:
+                types = [c[0] for c in mask_candidates]
+                # Look for: (black_rect?, white_rect, black_path, white_rect)
+                for k, (ctype, cidx) in enumerate(mask_candidates):
+                    if ctype == "black_path":
+                        # Check if surrounded by white rects
+                        has_white_before = any(
+                            t == "white_rect" for t, _ in mask_candidates[:k]
+                        )
+                        has_white_after = any(
+                            t == "white_rect" for t, _ in mask_candidates[k + 1 :]
+                        )
+                        if has_white_before and has_white_after:
+                            # This is a soft mask pattern!
+                            # Skip white rects, render black path as white
+                            for t, idx in mask_candidates:
+                                if t == "white_rect":
+                                    skip_indices.add(idx)
+                                elif t == "black_rect":
+                                    skip_indices.add(idx)
+                            # Render the black path as white
+                            color_overrides[cidx] = "#ffffff"
+                            break
+
+        return skip_indices, color_overrides
+
     def extract_graphics(self) -> List[GraphicsInfo]:
         """Extract vector graphics (rects, lines, paths, curves)."""
         graphics = []
@@ -588,7 +686,13 @@ class PyMuPDFPage(PageBackend):
             if not has_stroked:
                 skip_fill_only = True  # Skip fill-only drawings (glyph outlines)
 
-        for drawing in drawings:
+        # Detect soft mask compositing patterns (checkboxes, icons, etc.)
+        skip_indices, color_overrides = self._detect_soft_mask_compositing(drawings)
+
+        for idx, drawing in enumerate(drawings):
+            # Skip drawings that are soft mask constructs
+            if idx in skip_indices:
+                continue
             rect = drawing.get("rect")
             if not rect:
                 continue
@@ -608,6 +712,10 @@ class PyMuPDFPage(PageBackend):
             stroke_hex = _color_to_hex(color) if color else None
             fill_hex = _color_to_hex(fill) if fill else None
 
+            # Apply color override from soft mask compositing detection
+            if idx in color_overrides:
+                fill_hex = color_overrides[idx]
+
             # Extract dash pattern
             dashes_str = drawing.get("dashes")
             stroke_dashes = None
@@ -626,6 +734,7 @@ class PyMuPDFPage(PageBackend):
             # Build path commands from all items in this drawing
             path_commands = []
             points = []
+            current_pos = None  # Track current position for proper path building
 
             for item in items:
                 cmd = item[0]
@@ -644,14 +753,17 @@ class PyMuPDFPage(PageBackend):
                             )
                         )
 
-                elif cmd == "l":  # Line
+                elif cmd == "l":  # Line from p1 to p2
                     p1, p2 = item[1], item[2]
                     points.append((p1.x, p1.y))
                     points.append((p2.x, p2.y))
-                    path_commands.append(("m", p1.x, p1.y))
+                    # Only add moveto if we're not already at p1
+                    if current_pos != (p1.x, p1.y):
+                        path_commands.append(("m", p1.x, p1.y))
                     path_commands.append(("l", p2.x, p2.y))
+                    current_pos = (p2.x, p2.y)
 
-                elif cmd == "c":  # Cubic bezier curve
+                elif cmd == "c":  # Cubic bezier: start at p1, controls p2/p3, end at p4
                     p1, p2, p3, p4 = item[1], item[2], item[3], item[4]
                     points.extend(
                         [
@@ -661,8 +773,11 @@ class PyMuPDFPage(PageBackend):
                             (p4.x, p4.y),
                         ]
                     )
-                    path_commands.append(("m", p1.x, p1.y))
+                    # Only add moveto if we're not already at p1
+                    if current_pos != (p1.x, p1.y):
+                        path_commands.append(("m", p1.x, p1.y))
                     path_commands.append(("c", p2.x, p2.y, p3.x, p3.y, p4.x, p4.y))
+                    current_pos = (p4.x, p4.y)
 
                 elif cmd == "qu":  # Quad (4 points)
                     quad = item[1]
@@ -677,6 +792,7 @@ class PyMuPDFPage(PageBackend):
                     for pt in pts[1:]:
                         path_commands.append(("l", pt[0], pt[1]))
                     path_commands.append(("h",))  # Close path
+                    current_pos = (pts[0][0], pts[0][1])  # Closed path returns to start
 
             # If we collected path commands, create a path graphic
             if path_commands and len(path_commands) > 1:
@@ -801,6 +917,65 @@ class PyMuPDFPage(PageBackend):
 
         return links
 
+    def search_text(
+        self,
+        query: str,
+        case_sensitive: bool = False,
+        whole_word: bool = False,
+    ) -> List[SearchResult]:
+        """Search for text on this page.
+
+        Uses PyMuPDF's search_for method which returns quads/rects
+        for each match occurrence.
+        """
+        if not query:
+            return []
+
+        results = []
+
+        # Build search flags
+        flags = pymupdf.TEXT_PRESERVE_WHITESPACE
+        if not case_sensitive:
+            flags |= pymupdf.TEXT_PRESERVE_LIGATURES
+
+        # PyMuPDF search_for returns list of Rect or Quad objects
+        # quads=True returns Quad for better accuracy with rotated text
+        matches = self._page.search_for(query, quads=True)
+
+        for match in matches:
+            # Each match is a Quad object
+            if hasattr(match, "rect"):
+                # It's a Quad, get the bounding rect
+                rect = match.rect
+                quads = [(match.ul.x, match.ul.y, match.lr.x, match.lr.y)]
+            else:
+                # It's already a Rect
+                rect = match
+                quads = None
+
+            # Check whole word if required
+            if whole_word:
+                # Get text around the match to verify word boundaries
+                # We extract text from the page and check the match context
+                page_text = self._page.get_text("text")
+                # Simple heuristic: check if the match is a whole word
+                # This is approximate - PyMuPDF doesn't have built-in whole word search
+                match_text = query
+                # For now, include all matches - whole word filtering would need
+                # character-level position checking which is complex
+                pass
+
+            results.append(
+                SearchResult(
+                    page_index=self._index,
+                    rect=(rect.x0, rect.y0, rect.x1, rect.y1),
+                    text=query,
+                    quads=quads,
+                )
+            )
+
+        return results
+
     def add_highlight(self, rects: List[Rect], color: Color) -> None:
         for rect in rects:
             annot = self._page.add_highlight_annot(pymupdf.Rect(rect))
@@ -846,6 +1021,159 @@ class PyMuPDFPage(PageBackend):
         annot = self._page.add_ink_annot(ink_list)
         annot.set_colors(stroke=color)
         annot.set_border(width=width)
+        annot.update()
+
+    # Shape annotations
+
+    def _line_end_to_pymupdf(self, style: LineEndStyle) -> int:
+        """Convert LineEndStyle to PyMuPDF constant."""
+        mapping = {
+            LineEndStyle.NONE: pymupdf.PDF_ANNOT_LE_NONE,
+            LineEndStyle.SQUARE: pymupdf.PDF_ANNOT_LE_SQUARE,
+            LineEndStyle.CIRCLE: pymupdf.PDF_ANNOT_LE_CIRCLE,
+            LineEndStyle.DIAMOND: pymupdf.PDF_ANNOT_LE_DIAMOND,
+            LineEndStyle.OPEN_ARROW: pymupdf.PDF_ANNOT_LE_OPEN_ARROW,
+            LineEndStyle.CLOSED_ARROW: pymupdf.PDF_ANNOT_LE_CLOSED_ARROW,
+            LineEndStyle.BUTT: pymupdf.PDF_ANNOT_LE_BUTT,
+            LineEndStyle.R_OPEN_ARROW: pymupdf.PDF_ANNOT_LE_R_OPEN_ARROW,
+            LineEndStyle.R_CLOSED_ARROW: pymupdf.PDF_ANNOT_LE_R_CLOSED_ARROW,
+            LineEndStyle.SLASH: pymupdf.PDF_ANNOT_LE_SLASH,
+        }
+        return mapping.get(style, pymupdf.PDF_ANNOT_LE_NONE)
+
+    def add_freetext(
+        self,
+        rect: Rect,
+        text: str,
+        font_size: float = 12.0,
+        font_name: str = "helv",
+        text_color: Color = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        border_color: Optional[Color] = None,
+        border_width: float = 0.0,
+        align: int = 0,
+    ) -> None:
+        """Add free text annotation.
+
+        Note: FreeText annotations in PyMuPDF have limited border support.
+        border_color is ignored due to PyMuPDF limitations.
+        """
+        annot = self._page.add_freetext_annot(
+            pymupdf.Rect(rect),
+            text,
+            fontsize=font_size,
+            fontname=font_name,
+            text_color=text_color,
+            fill_color=fill_color,
+            align=align,
+        )
+        # FreeText annotations don't support set_colors for stroke
+        # Only set border width if specified
+        if border_width > 0:
+            annot.set_border(width=border_width)
+        annot.update()
+
+    def add_rect(
+        self,
+        rect: Rect,
+        stroke_color: Optional[Color] = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        width: float = 1.0,
+    ) -> None:
+        """Add rectangle annotation."""
+        annot = self._page.add_rect_annot(pymupdf.Rect(rect))
+        annot.set_colors(stroke=stroke_color, fill=fill_color)
+        annot.set_border(width=width)
+        annot.update()
+
+    def add_circle(
+        self,
+        rect: Rect,
+        stroke_color: Optional[Color] = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        width: float = 1.0,
+    ) -> None:
+        """Add circle/ellipse annotation."""
+        annot = self._page.add_circle_annot(pymupdf.Rect(rect))
+        annot.set_colors(stroke=stroke_color, fill=fill_color)
+        annot.set_border(width=width)
+        annot.update()
+
+    def add_line(
+        self,
+        start: Point,
+        end: Point,
+        color: Color = (0.0, 0.0, 0.0),
+        width: float = 1.0,
+        start_style: LineEndStyle = LineEndStyle.NONE,
+        end_style: LineEndStyle = LineEndStyle.NONE,
+    ) -> None:
+        """Add line annotation."""
+        annot = self._page.add_line_annot(
+            pymupdf.Point(start),
+            pymupdf.Point(end),
+        )
+        annot.set_colors(stroke=color)
+        annot.set_border(width=width)
+        # Set line endings
+        annot.set_line_ends(
+            self._line_end_to_pymupdf(start_style),
+            self._line_end_to_pymupdf(end_style),
+        )
+        annot.update()
+
+    def add_arrow(
+        self,
+        start: Point,
+        end: Point,
+        color: Color = (0.0, 0.0, 0.0),
+        width: float = 1.0,
+    ) -> None:
+        """Add arrow annotation (line with arrow head at end)."""
+        self.add_line(
+            start=start,
+            end=end,
+            color=color,
+            width=width,
+            start_style=LineEndStyle.NONE,
+            end_style=LineEndStyle.CLOSED_ARROW,
+        )
+
+    def add_polygon(
+        self,
+        points: List[Point],
+        stroke_color: Optional[Color] = (0.0, 0.0, 0.0),
+        fill_color: Optional[Color] = None,
+        width: float = 1.0,
+    ) -> None:
+        """Add polygon annotation (closed shape)."""
+        if len(points) < 3:
+            return
+        pymupdf_points = [pymupdf.Point(p) for p in points]
+        annot = self._page.add_polygon_annot(pymupdf_points)
+        annot.set_colors(stroke=stroke_color, fill=fill_color)
+        annot.set_border(width=width)
+        annot.update()
+
+    def add_polyline(
+        self,
+        points: List[Point],
+        color: Color = (0.0, 0.0, 0.0),
+        width: float = 1.0,
+        start_style: LineEndStyle = LineEndStyle.NONE,
+        end_style: LineEndStyle = LineEndStyle.NONE,
+    ) -> None:
+        """Add polyline annotation (open shape)."""
+        if len(points) < 2:
+            return
+        pymupdf_points = [pymupdf.Point(p) for p in points]
+        annot = self._page.add_polyline_annot(pymupdf_points)
+        annot.set_colors(stroke=color)
+        annot.set_border(width=width)
+        annot.set_line_ends(
+            self._line_end_to_pymupdf(start_style),
+            self._line_end_to_pymupdf(end_style),
+        )
         annot.update()
 
 
