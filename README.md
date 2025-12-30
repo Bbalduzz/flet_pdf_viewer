@@ -5,7 +5,7 @@ A pure Python PDF viewer built with Flet Canvas, no external Flutter packages.
 
 ## Features
 
-- **Text rendering** with font mapping and styling
+- **Text rendering** with embedded font extraction and registration
 - **Character-level text selection** with multi-line support
 - **Text annotations**: highlight, underline, strikethrough, squiggly, sticky notes
 - **Shape annotations**: rectangles, circles, lines, arrows - draw interactively by click-and-drag
@@ -31,6 +31,8 @@ from flet_pdf_viewer import PdfDocument, PdfViewer, ViewerMode
 
 def main(page: ft.Page):
     document = PdfDocument("/path/to/file.pdf")
+    page.fonts = document.fonts
+
     viewer = PdfViewer(document, mode=ViewerMode.CONTINUOUS)
     page.add(viewer.control)
 
@@ -49,9 +51,11 @@ document = PdfDocument(source)  # str, Path, bytes, or BytesIO
 - `page_count` - Number of pages
 - `toc` - Table of contents (list of `TocItem`)
 - `metadata` - Document metadata dict
+- `fonts` - Extracted embedded fonts (dict mapping font names to file paths)
 
 **Methods:**
 - `get_page_size(index)` - Returns `(width, height)` in points
+- `extract_fonts(assets_dir=None)` - Extract embedded fonts, returns dict for `page.fonts`
 - `save(path=None)` - Save document (to original path if None)
 - `close()` - Release resources
 
@@ -151,6 +155,27 @@ ShapeType.LINE       # Line annotation
 ShapeType.ARROW      # Arrow annotation
 ```
 
+## Font Handling
+
+PDFs often embed custom fonts. The viewer extracts these fonts and registers them with Flet for accurate text rendering:
+
+```python
+document = PdfDocument("/path/to/file.pdf")
+
+# Option 1: Use fonts property (extracts to temp directory)
+page.fonts = document.fonts
+
+# Option 2: Extract to assets directory (for production)
+fonts = document.extract_fonts(assets_dir="assets")
+page.fonts = fonts
+# Run with: ft.app(target=main, assets_dir="assets")
+```
+
+The font extraction:
+- Extracts TTF/OTF fonts embedded in the PDF
+- Handles subset font names (e.g., `ABCDEF+Arial` → `Arial`)
+- Falls back to system fonts when extraction fails
+
 ## Interactive Shape Drawing
 
 Enable shape drawing mode to let users draw shapes by clicking and dragging on the page:
@@ -232,7 +257,7 @@ flet_pdf_viewer/
 
 - Performance on large/complex PDFs (canvas-based rendering)
 - No form filling or embedded multimedia
-- Text rendering fidelity depends on system font availability
+- Some fonts may not render correctly if not extractable from the PDF
 
 ## License
 
