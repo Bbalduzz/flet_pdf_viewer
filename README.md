@@ -1,5 +1,5 @@
 # Flet PDF Viewer
-https://github.com/user-attachments/assets/15736e36-9950-4220-a707-a567b919e266
+https://github.com/user-attachments/assets/8548970f-36ae-4438-94db-b1c8edb8a159
 
 A pure Python PDF viewer built with Flet Canvas, no external Flutter packages.
 
