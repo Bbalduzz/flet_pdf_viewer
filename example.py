@@ -33,8 +33,8 @@ HIGHLIGHT_COLORS = [
     ("#fecaca", (1.0, 0.79, 0.79)),  # Pink
 ]
 
-# PDF_PATH = "TEST - Supporting Student Hall on Arches.pdf"
-PDF_PATH = "/Users/edoardobalducci/Downloads/issue8111.pdf"
+PDF_PATH = "TEST - Supporting Student Hall on Arches.pdf"
+# PDF_PATH = "/Users/edoardobalducci/Downloads/magic.pdf"
 
 
 def main(page: ft.Page):
@@ -42,8 +42,6 @@ def main(page: ft.Page):
     page.padding = 0
     page.bgcolor = COLORS["bg"]
     page.theme_mode = ft.ThemeMode.DARK
-    page.fonts = {"Inter": "https://rsms.me/inter/font-files/Inter-Regular.woff2"}
-    page.theme = ft.Theme(font_family="Inter")
 
     # Selected highlight color
     selected_color = [0]
@@ -248,6 +246,9 @@ def main(page: ft.Page):
     # Load document
     document = PdfDocument(PDF_PATH)
     # document = PdfDocument("/Users/edoardobalducci/Downloads/issue8111.pdf")
+    print(document.fonts)
+    # Register embedded PDF fonts
+    page.fonts = document.fonts
 
     viewer = PdfViewer(
         source=document,
@@ -1259,107 +1260,126 @@ def main(page: ft.Page):
         return controls
 
     def show_pdf_info(e):
-        """Show PDF information in a dialog."""
+        """Show PDF information dialog - Vercel design system."""
         import os
 
-        # Get file info
-        file_path = PDF_PATH
-        file_size = "Unknown"
+        # Data
+        file_name = os.path.basename(PDF_PATH)
         try:
-            size_bytes = os.path.getsize(file_path)
-            if size_bytes < 1024:
-                file_size = f"{size_bytes} B"
-            elif size_bytes < 1024 * 1024:
-                file_size = f"{size_bytes / 1024:.1f} KB"
-            else:
-                file_size = f"{size_bytes / (1024 * 1024):.1f} MB"
+            size_bytes = os.path.getsize(PDF_PATH)
+            file_size = f"{size_bytes:,} bytes"
         except Exception:
-            pass
+            file_size = "—"
 
-        # Get metadata
-        metadata = document.metadata
-        page_width, page_height = document.get_page_size(0)
+        meta = document.metadata
+        w, h = document.get_page_size(0)
+        perms = document.permissions
+        fonts = sorted(document.fonts.keys()) if document.fonts else []
 
-        # Get permissions
-        permissions = document.permissions
+        # Monochromatic palette
+        white = "#fafafa"
+        gray1 = "#888888"  # secondary text
+        gray2 = "#444444"  # borders, inactive
+        gray3 = "#1a1a1a"  # subtle bg
+        black = "#000000"
 
-        def info_row(label: str, value: str):
-            return ft.Row(
-                [
-                    ft.Text(label, size=12, color=COLORS["text_muted"], width=120),
-                    ft.Text(
-                        value or "N/A",
-                        size=12,
-                        color=COLORS["text"],
-                        expand=True,
-                        overflow=ft.TextOverflow.ELLIPSIS,
-                    ),
-                ],
-                spacing=8,
+        def label_value(lbl: str, val: str):
+            return ft.Container(
+                content=ft.Row(
+                    [
+                        ft.Text(lbl, size=11, color=gray1, weight=ft.FontWeight.W_400),
+                        ft.Text(val or "—", size=11, color=white if val else gray2, weight=ft.FontWeight.W_500),
+                    ],
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
+                ),
+                padding=ft.padding.symmetric(vertical=8),
+                border=ft.border.only(bottom=ft.BorderSide(1, gray3)),
             )
 
         def section_header(title: str):
             return ft.Container(
-                content=ft.Text(
-                    title,
-                    size=13,
-                    color=COLORS["text"],
-                    weight=ft.FontWeight.W_600,
-                ),
-                padding=ft.padding.only(top=16, bottom=8),
+                content=ft.Text(title, size=10, color=gray1, weight=ft.FontWeight.W_600),
+                padding=ft.padding.only(top=20, bottom=2),
             )
 
-        def permission_chip(name: str, allowed: bool):
+        def perm_row(items: list):
             return ft.Container(
                 content=ft.Row(
                     [
-                        ft.Icon(
-                            ft.Icons.CHECK_CIRCLE if allowed else ft.Icons.CANCEL,
-                            size=14,
-                            color="#22c55e" if allowed else "#ef4444",
-                        ),
-                        ft.Text(name, size=12, color=COLORS["text"]),
+                        ft.Row(
+                            [
+                                ft.Container(
+                                    width=6, height=6, border_radius=3,
+                                    bgcolor=white if allowed else gray2,
+                                ),
+                                ft.Text(name, size=11, color=white if allowed else gray2, weight=ft.FontWeight.W_400),
+                            ],
+                            spacing=8,
+                        )
+                        for name, allowed in items
                     ],
-                    spacing=4,
+                    alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
-                padding=ft.padding.symmetric(horizontal=8, vertical=4),
-                border_radius=4,
-                bgcolor=COLORS["surface_hover"],
+                padding=ft.padding.symmetric(vertical=8),
             )
 
-        # Build content
+        def font_chip(name: str):
+            return ft.Container(
+                content=ft.Text(name, size=10, color=white, weight=ft.FontWeight.W_400),
+                bgcolor=gray3,
+                padding=ft.padding.symmetric(horizontal=10, vertical=6),
+                border_radius=4,
+            )
+
+        # Clean date format
+        def fmt_date(d):
+            if not d:
+                return None
+            return d.replace("D:", "").split("+")[0].split("-")[0] if d else None
+
         content = ft.Column(
             [
-                # General Info
-                section_header("General Information"),
-                info_row("File Name", os.path.basename(file_path)),
-                info_row("File Size", file_size),
-                info_row("Pages", str(document.page_count)),
-                info_row("Page Size", f"{page_width:.0f} x {page_height:.0f} pts"),
-                info_row("Encrypted", "Yes" if document.is_encrypted else "No"),
+                # File
+                label_value("Name", file_name),
+                label_value("Size", file_size),
+                label_value("Pages", str(document.page_count)),
+                label_value("Dimensions", f"{w:.0f} × {h:.0f} pt"),
+
                 # Metadata
-                section_header("Document Metadata"),
-                info_row("Title", metadata.get("title", "")),
-                info_row("Author", metadata.get("author", "")),
-                info_row("Subject", metadata.get("subject", "")),
-                info_row("Creator", metadata.get("creator", "")),
-                info_row("Producer", metadata.get("producer", "")),
-                info_row("Creation Date", metadata.get("creationDate", "")),
-                info_row("Modification Date", metadata.get("modDate", "")),
-                # Permissions
-                section_header("Permissions"),
-                ft.Row(
-                    [
-                        permission_chip("Print", permissions.get("print", False)),
-                        permission_chip("Copy", permissions.get("copy", False)),
-                        permission_chip("Modify", permissions.get("modify", False)),
-                        permission_chip("Annotate", permissions.get("annotate", False)),
-                    ],
-                    spacing=8,
-                    wrap=True,
+                section_header("Metadata"),
+                label_value("Title", meta.get("title")),
+                label_value("Author", meta.get("author")),
+                label_value("Subject", meta.get("subject")),
+                label_value("Creator", meta.get("creator")),
+                label_value("Producer", meta.get("producer")),
+                label_value("Created", fmt_date(meta.get("creationDate"))),
+                label_value("Modified", fmt_date(meta.get("modDate"))),
+
+                # Security
+                section_header("Security"),
+                label_value("Encrypted", "Yes" if document.is_encrypted else "No"),
+                perm_row([
+                    ("Print", perms.get("print", False)),
+                    ("Copy", perms.get("copy", False)),
+                ]),
+                perm_row([
+                    ("Modify", perms.get("modify", False)),
+                    ("Annotate", perms.get("annotate", False)),
+                ]),
+
+                # Fonts
+                section_header(f"Fonts ({len(fonts)})"),
+                ft.Container(
+                    content=ft.Row(
+                        [font_chip(f) for f in fonts] if fonts else [ft.Text("None", size=11, color=gray2)],
+                        wrap=True,
+                        spacing=6,
+                        run_spacing=6,
+                    ),
+                    padding=ft.padding.only(top=6, bottom=12),
                 ),
             ],
-            spacing=4,
+            spacing=0,
             scroll=ft.ScrollMode.AUTO,
         )
 
@@ -1368,22 +1388,29 @@ def main(page: ft.Page):
             page.update()
 
         dialog = ft.AlertDialog(
-            title=ft.Row(
-                [
-                    ft.Icon(ft.Icons.PICTURE_AS_PDF, color="#ffffff", size=24),
-                    ft.Text("PDF Information", color=COLORS["text"]),
-                ],
-                spacing=8,
-            ),
-            bgcolor=COLORS["surface"],
+            modal=True,
+            bgcolor=black,
+            surface_tint_color=black,
+            shape=ft.RoundedRectangleBorder(radius=10),
+            title=None,
             content=ft.Container(
                 content=content,
-                width=400,
-                height=400,
+                width=360,
+                height=460,
+                bgcolor=black,
+                padding=ft.padding.symmetric(horizontal=20, vertical=4),
             ),
             actions=[
-                ft.TextButton("Close", on_click=close_dialog),
+                ft.Container(
+                    content=ft.Text("Close", size=11, color=white, weight=ft.FontWeight.W_500),
+                    bgcolor=gray3,
+                    padding=ft.padding.symmetric(horizontal=16, vertical=8),
+                    border_radius=6,
+                    on_click=close_dialog,
+                ),
             ],
+            actions_alignment=ft.MainAxisAlignment.END,
+            actions_padding=ft.padding.only(right=20, bottom=16),
         )
         page.overlay.append(dialog)
         dialog.open = True

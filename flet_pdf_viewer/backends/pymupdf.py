@@ -64,30 +64,26 @@ def _color_to_hex(color) -> str:
     return "#000000"
 
 
-def _map_font_name(pdf_font: str) -> str:
-    """Map PDF font name to system font family."""
+def _get_font_family(pdf_font: str, flags: int = 0) -> str:
+    """Get font family name for Flet.
+
+    Returns the clean PDF font name, which should match the key in page.fonts
+    if fonts were extracted and registered.
+
+    Args:
+        pdf_font: The PDF font name (may include subset prefix like "ABCDEF+")
+        flags: PyMuPDF span flags (unused, kept for API compatibility)
+
+    Returns:
+        Clean font name like "Effloresce" or "LiberationSerif"
+    """
     if not pdf_font:
         return "sans-serif"
 
-    if "+" in pdf_font:
-        pdf_font = pdf_font.split("+")[-1]
+    # Remove subset prefix (e.g., "PXAAAB+FontName" -> "FontName")
+    clean_name = pdf_font.split("+")[-1] if "+" in pdf_font else pdf_font
 
-    lower = pdf_font.lower().replace("-", "").replace("_", "")
-
-    if "helvetica" in lower or "arial" in lower:
-        return "Helvetica"
-    if "times" in lower:
-        return "Times New Roman"
-    if "courier" in lower:
-        return "Courier New"
-    if "mono" in lower or "fixed" in lower:
-        return "monospace"
-    if "sans" in lower:
-        return "sans-serif"
-    if "serif" in lower:
-        return "serif"
-
-    return "sans-serif"
+    return clean_name
 
 
 class PyMuPDFPage(PageBackend):
@@ -118,43 +114,68 @@ class PyMuPDFPage(PageBackend):
             # Find all xref references in the page object
             all_refs = re.findall(r"/(\w+)\s+(\d+)\s+0\s+R", page_obj)
 
-            # First pass: find Pattern dictionary reference
-            pattern_dict_xref = None
+            # First, find and follow the Resources reference
+            resources_obj = page_obj
             for name, xref_str in all_refs:
+                if name == "Resources":
+                    resources_xref = int(xref_str)
+                    resources_obj = doc.xref_object(resources_xref)
+                    break
+
+            # Find Pattern dictionary in resources
+            pattern_dict_xref = None
+            resource_refs = re.findall(r"/(\w+)\s+(\d+)\s+0\s+R", resources_obj)
+            for name, xref_str in resource_refs:
                 if name == "Pattern":
                     pattern_dict_xref = int(xref_str)
                     break
 
-            # If we have a Pattern dictionary, look inside it for patterns
-            xrefs_to_check = []
+            # Also check for inline Pattern dictionary: /Pattern << /P1 5 0 R >>
+            if not pattern_dict_xref:
+                inline_pattern = re.search(
+                    r"/Pattern\s*<<([^>]+)>>", resources_obj, re.DOTALL
+                )
+                if inline_pattern:
+                    pattern_content = inline_pattern.group(1)
+                    pattern_refs = re.findall(r"/(\w+)\s+(\d+)\s+0\s+R", pattern_content)
+                    for pattern_name, xref_str in pattern_refs:
+                        xref = int(xref_str)
+                        try:
+                            obj = doc.xref_object(xref)
+                            if "/PatternType 2" in obj:
+                                shading_match = re.search(
+                                    r"/Shading\s+(\d+)\s+0\s+R", obj
+                                )
+                                if shading_match:
+                                    shading_xref = int(shading_match.group(1))
+                                    gradient = self._parse_shading(doc, shading_xref)
+                                    if gradient:
+                                        self._shadings[pattern_name] = gradient
+                        except Exception:
+                            continue
+
+            # If we have a Pattern dictionary reference, look inside it for patterns
             if pattern_dict_xref:
                 try:
                     pattern_dict = doc.xref_object(pattern_dict_xref)
-                    # Find pattern references inside: /R9 9 0 R or /P1 2 0 R
                     pattern_refs = re.findall(r"/(\w+)\s+(\d+)\s+0\s+R", pattern_dict)
-                    xrefs_to_check.extend(pattern_refs)
+                    for pattern_name, xref_str in pattern_refs:
+                        xref = int(xref_str)
+                        try:
+                            obj = doc.xref_object(xref)
+                            if "/PatternType 2" in obj:
+                                shading_match = re.search(
+                                    r"/Shading\s+(\d+)\s+0\s+R", obj
+                                )
+                                if shading_match:
+                                    shading_xref = int(shading_match.group(1))
+                                    gradient = self._parse_shading(doc, shading_xref)
+                                    if gradient:
+                                        self._shadings[pattern_name] = gradient
+                        except Exception:
+                            continue
                 except Exception:
                     pass
-
-            # Also check direct references in page object
-            xrefs_to_check.extend(all_refs)
-
-            for pattern_name, xref_str in xrefs_to_check:
-                xref = int(xref_str)
-                try:
-                    obj = doc.xref_object(xref)
-
-                    # Check if this is a shading pattern (PatternType 2)
-                    if "/PatternType 2" in obj:
-                        # Find the shading reference
-                        shading_match = re.search(r"/Shading\s+(\d+)\s+0\s+R", obj)
-                        if shading_match:
-                            shading_xref = int(shading_match.group(1))
-                            gradient = self._parse_shading(doc, shading_xref)
-                            if gradient:
-                                self._shadings[pattern_name] = gradient
-                except Exception:
-                    continue
 
         except Exception:
             pass
@@ -183,21 +204,83 @@ class PyMuPDFPage(PageBackend):
             func_xref = int(func_match.group(1))
             func_obj = doc.xref_object(func_xref)
 
-            # Extract colors from function (Type 2 exponential interpolation)
-            c0_match = re.search(r"/C0\s+\[\s*([\d.\s-]+)\s*\]", func_obj)
-            c1_match = re.search(r"/C1\s+\[\s*([\d.\s-]+)\s*\]", func_obj)
+            # Determine function type
+            func_type_match = re.search(r"/FunctionType\s+(\d+)", func_obj)
+            func_type = int(func_type_match.group(1)) if func_type_match else 2
 
-            if not c0_match or not c1_match:
+            colors = []
+
+            if func_type == 0:
+                # Sampled function - read sample data to extract colors
+                # Get number of samples and extract first/last colors
+                size_match = re.search(r"/Size\s+\[\s*(\d+)\s*\]", func_obj)
+                if size_match:
+                    num_samples = int(size_match.group(1))
+                    try:
+                        # Read the stream data (contains RGB samples)
+                        stream_data = doc.xref_stream(func_xref)
+                        if stream_data and len(stream_data) >= 6:
+                            # First 3 bytes = start color (RGB 0-255)
+                            c0 = (
+                                stream_data[0] / 255.0,
+                                stream_data[1] / 255.0,
+                                stream_data[2] / 255.0,
+                            )
+                            # Last 3 bytes = end color (RGB 0-255)
+                            c1 = (
+                                stream_data[-3] / 255.0,
+                                stream_data[-2] / 255.0,
+                                stream_data[-1] / 255.0,
+                            )
+                            colors = [c0, c1]
+                    except Exception:
+                        pass
+
+            elif func_type == 2:
+                # Exponential interpolation function with C0 and C1
+                c0_match = re.search(r"/C0\s+\[\s*([\d.\s-]+)\s*\]", func_obj)
+                c1_match = re.search(r"/C1\s+\[\s*([\d.\s-]+)\s*\]", func_obj)
+
+                if c0_match and c1_match:
+                    c0 = tuple(float(x) for x in c0_match.group(1).split())
+                    c1 = tuple(float(x) for x in c1_match.group(1).split())
+                    if len(c0) >= 3 and len(c1) >= 3:
+                        colors = [c0[:3], c1[:3]]
+
+            elif func_type == 3:
+                # Stitching function - get colors from subfunctions
+                # Find the Functions array
+                funcs_match = re.search(r"/Functions\s+\[([\s\d]+0\s+R)+\]", func_obj)
+                if funcs_match:
+                    sub_refs = re.findall(r"(\d+)\s+0\s+R", funcs_match.group(0))
+                    for sub_xref_str in sub_refs:
+                        sub_xref = int(sub_xref_str)
+                        try:
+                            sub_obj = doc.xref_object(sub_xref)
+                            c0_match = re.search(
+                                r"/C0\s+\[\s*([\d.\s-]+)\s*\]", sub_obj
+                            )
+                            c1_match = re.search(
+                                r"/C1\s+\[\s*([\d.\s-]+)\s*\]", sub_obj
+                            )
+                            if c0_match:
+                                c0 = tuple(
+                                    float(x) for x in c0_match.group(1).split()
+                                )
+                                if len(c0) >= 3:
+                                    if not colors:
+                                        colors.append(c0[:3])
+                            if c1_match:
+                                c1 = tuple(
+                                    float(x) for x in c1_match.group(1).split()
+                                )
+                                if len(c1) >= 3:
+                                    colors.append(c1[:3])
+                        except Exception:
+                            continue
+
+            if not colors or len(colors) < 2:
                 return None
-
-            c0 = tuple(float(x) for x in c0_match.group(1).split())
-            c1 = tuple(float(x) for x in c1_match.group(1).split())
-
-            # Ensure RGB (3 components)
-            if len(c0) < 3 or len(c1) < 3:
-                return None
-
-            colors = [c0[:3], c1[:3]]
 
             if shading_type == 2:  # Axial (linear) gradient
                 coords_match = re.search(r"/Coords\s+\[\s*([\d.\s-]+)\s*\]", obj)
@@ -241,6 +324,64 @@ class PyMuPDFPage(PageBackend):
 
         return None
 
+    def _get_text_color_map(self) -> Dict[str, str]:
+        """Parse content stream to determine which text uses gradient vs solid color.
+
+        Returns a dict mapping text content to color type: 'gradient' or 'solid'.
+        """
+        color_map = {}
+
+        try:
+            contents = self._page.read_contents()
+            if not contents:
+                return color_map
+
+            content_str = contents.decode("latin-1", errors="replace")
+
+            # Track current fill state: 'pattern' or 'solid'
+            current_fill = "solid"
+
+            # Split into tokens/operations
+            # Look for color operations and text operations
+            lines = content_str.replace("\r", "\n").split("\n")
+
+            in_text_block = False
+            for line in lines:
+                line = line.strip()
+                if not line:
+                    continue
+
+                # Pattern colorspace + pattern: indicates gradient
+                if "cs" in line and "scn" in line:
+                    current_fill = "pattern"
+                elif " scn" in line or line.endswith(" scn"):
+                    # Setting a pattern
+                    current_fill = "pattern"
+                elif " rg" in line or line.endswith(" rg"):
+                    # Setting solid RGB color
+                    current_fill = "solid"
+                elif " g" in line and "rg" not in line:
+                    # Setting solid gray
+                    current_fill = "solid"
+                elif "BT" in line:
+                    in_text_block = True
+                elif "ET" in line:
+                    in_text_block = False
+                elif in_text_block and ("Tj" in line or "TJ" in line):
+                    # Extract text from Tj or TJ operator
+                    # Format: (text)Tj or [(text)]TJ
+                    import re as re_mod
+
+                    text_matches = re_mod.findall(r"\(([^)]*)\)", line)
+                    for text in text_matches:
+                        if text:
+                            color_map[text] = current_fill
+
+        except Exception:
+            pass
+
+        return color_map
+
     def _detect_text_gradient(self) -> Optional[Union[LinearGradient, RadialGradient]]:
         """Detect if text on this page uses a gradient fill."""
         if self._text_gradient is not None:
@@ -253,10 +394,54 @@ class PyMuPDFPage(PageBackend):
                 return None
 
             content_str = contents.decode("latin-1", errors="replace")
+            doc = self._doc._doc
 
-            # Look for pattern color space usage before text
-            # Pattern: /Pattern cs /Pname scn ... BT ... text ... ET
+            # Check if Pattern colorspace is used
+            uses_pattern_colorspace = False
+
+            # Direct Pattern colorspace: /Pattern cs
             if "/Pattern cs" in content_str or "/Pattern CS" in content_str:
+                uses_pattern_colorspace = True
+
+            # Named colorspace that might be Pattern: /Rname cs
+            # Need to check if the colorspace resolves to [ /Pattern ]
+            if not uses_pattern_colorspace:
+                cs_match = re.search(r"/(\w+)\s+cs", content_str)
+                if cs_match:
+                    cs_name = cs_match.group(1)
+                    # Look up colorspace in page resources
+                    page_xref = self._page.xref
+                    page_obj = doc.xref_object(page_xref)
+
+                    # Find Resources reference
+                    res_match = re.search(r"/Resources\s+(\d+)\s+0\s+R", page_obj)
+                    if res_match:
+                        res_xref = int(res_match.group(1))
+                        res_obj = doc.xref_object(res_xref)
+                    else:
+                        # Resources might be inline
+                        res_obj = page_obj
+
+                    # Find ColorSpace dictionary
+                    cs_dict_match = re.search(
+                        r"/ColorSpace\s+(\d+)\s+0\s+R", res_obj
+                    )
+                    if cs_dict_match:
+                        cs_dict_xref = int(cs_dict_match.group(1))
+                        cs_dict = doc.xref_object(cs_dict_xref)
+
+                        # Find the named colorspace reference
+                        named_cs_match = re.search(
+                            rf"/{cs_name}\s+(\d+)\s+0\s+R", cs_dict
+                        )
+                        if named_cs_match:
+                            named_cs_xref = int(named_cs_match.group(1))
+                            named_cs_obj = doc.xref_object(named_cs_xref)
+                            # Check if it's [ /Pattern ]
+                            if "/Pattern" in named_cs_obj:
+                                uses_pattern_colorspace = True
+
+            if uses_pattern_colorspace:
                 # Find which pattern is used for non-stroking color
                 pattern_match = re.search(r"/(\w+)\s+scn", content_str)
                 if pattern_match:
@@ -298,6 +483,9 @@ class PyMuPDFPage(PageBackend):
 
         # Detect if page uses gradient for text
         text_gradient = self._detect_text_gradient()
+
+        # Get color map to know which text uses gradient vs solid color
+        text_color_map = self._get_text_color_map() if text_gradient else {}
 
         # Detect symbolic Type3 fonts (where graphics = content, not glyph outlines)
         # Heuristic: symbolic Type3 fonts have stroked drawings, text outline fonts are fill-only
@@ -366,8 +554,26 @@ class PyMuPDFPage(PageBackend):
                             g = (color >> 8) & 0xFF
                             b = color & 0xFF
                             line_color = f"#{r:02x}{g:02x}{b:02x}"
-                            # If color is black (0) and we have a gradient, it likely uses the gradient
-                            if color == 0 and text_gradient:
+
+                            # Check if this text uses gradient based on content stream parsing
+                            if text_gradient and text_color_map:
+                                # Check if any part of this text uses pattern fill
+                                # Use flexible matching since text can be truncated differently
+                                if text_color_map.get(text) == "pattern":
+                                    uses_gradient = True
+                                else:
+                                    # Try prefix matching
+                                    for map_text, fill_type in text_color_map.items():
+                                        if fill_type == "pattern":
+                                            # Check if either starts with the other
+                                            if (
+                                                text.startswith(map_text[:20])
+                                                or map_text.startswith(text[:20])
+                                            ):
+                                                uses_gradient = True
+                                                break
+                            elif color == 0 and text_gradient and not text_color_map:
+                                # Fallback: if color is black and we have a gradient but no map
                                 uses_gradient = True
 
                         line_bold = bool(flags & 16)
@@ -398,6 +604,7 @@ class PyMuPDFPage(PageBackend):
                             bold=line_bold,
                             italic=line_italic,
                             gradient=text_gradient if uses_gradient else None,
+                            font_flags=flags,  # Pass PyMuPDF font flags for classification
                         )
                     )
 
@@ -562,6 +769,53 @@ class PyMuPDFPage(PageBackend):
 
         return graphics
 
+    def _detect_even_odd_border(
+        self, drawing: dict
+    ) -> Optional[Tuple[List, float]]:
+        """Detect even-odd fill patterns that create borders.
+
+        When even_odd is True and the path contains two nested subpaths,
+        it creates a border effect. We detect this and return the outer
+        path with calculated border width.
+
+        Returns:
+            None if not an even-odd border, or (outer_path_items, border_width)
+        """
+        if not drawing.get("even_odd"):
+            return None
+
+        items = drawing.get("items", [])
+        if not items:
+            return None
+
+        # Even-odd borders typically have 2 subpaths (16 items for rounded rects)
+        # Each subpath has 8 items (4 curves + 4 lines for rounded rect)
+        if len(items) != 16:
+            return None
+
+        # Check if it's two similar subpaths (same structure)
+        first_half = items[:8]
+        second_half = items[8:]
+
+        # Verify both halves have same command structure
+        if [i[0] for i in first_half] != [i[0] for i in second_half]:
+            return None
+
+        # Calculate border width from the difference in positions
+        # Compare first point of outer vs inner path
+        outer_start = first_half[0][1]  # Start point of first item
+        inner_start = second_half[0][1]  # Start point of second subpath
+
+        border_width = abs(inner_start.x - outer_start.x)
+        if border_width < 0.1:
+            # Try y difference
+            border_width = abs(inner_start.y - outer_start.y)
+
+        if border_width < 0.1:
+            return None
+
+        return (first_half, border_width)
+
     def _detect_soft_mask_compositing(
         self, drawings: list
     ) -> Tuple[set, dict]:
@@ -709,8 +963,20 @@ class PyMuPDFPage(PageBackend):
             if skip_fill_only and fill is not None and (color is None or width == 0):
                 continue
 
-            stroke_hex = _color_to_hex(color) if color else None
-            fill_hex = _color_to_hex(fill) if fill else None
+            # Handle even-odd fill patterns (borders)
+            even_odd_border = self._detect_even_odd_border(drawing)
+            if even_odd_border:
+                outer_items, border_width = even_odd_border
+                # Convert to stroked path instead of filled
+                fill_hex = None
+                stroke_hex = _color_to_hex(fill)  # Use fill color as stroke
+                width = border_width
+                # Replace items with just the outer path
+                drawing = dict(drawing)
+                drawing["items"] = outer_items
+            else:
+                stroke_hex = _color_to_hex(color) if color else None
+                fill_hex = _color_to_hex(fill) if fill else None
 
             # Apply color override from soft mask compositing detection
             if idx in color_overrides:
@@ -1206,9 +1472,103 @@ class PyMuPDFBackend(DocumentBackend):
 
         self._pages: Dict[int, PyMuPDFPage] = {}
 
+        # Font extraction state
+        self._extracted_fonts: Optional[Dict[str, str]] = None
+        self._font_temp_dir: Optional[str] = None
+        self._use_relative_paths: bool = False
+
     @property
     def page_count(self) -> int:
         return len(self._doc)
+
+    def extract_fonts(self, assets_dir: Optional[str] = None) -> Dict[str, str]:
+        """Extract embedded fonts from the PDF.
+
+        Args:
+            assets_dir: Optional path to assets directory. If provided, fonts
+                       are saved there with relative paths for Flet compatibility.
+                       If None, fonts are saved to a temp directory.
+
+        Returns:
+            Dict mapping clean font names to font paths.
+            Use with Flet: page.fonts.update(document.fonts)
+        """
+        if self._extracted_fonts is not None:
+            return self._extracted_fonts
+
+        self._extracted_fonts = {}
+
+        # Determine where to save fonts
+        if assets_dir:
+            # Use assets directory - save to fonts subfolder
+            fonts_dir = Path(assets_dir) / "fonts"
+            fonts_dir.mkdir(parents=True, exist_ok=True)
+            self._font_temp_dir = str(fonts_dir)
+            self._use_relative_paths = True
+        else:
+            # Use temp directory
+            self._font_temp_dir = tempfile.mkdtemp(prefix="pdf_fonts_")
+            self._use_relative_paths = False
+
+        # Collect all unique font xrefs from all pages
+        seen_xrefs = set()
+        for page_num in range(len(self._doc)):
+            for font_info in self._doc.get_page_fonts(page_num, full=True):
+                xref = font_info[0]
+                if xref not in seen_xrefs:
+                    seen_xrefs.add(xref)
+                    self._extract_single_font(xref)
+
+        return self._extracted_fonts
+
+    def _extract_single_font(self, xref: int) -> None:
+        """Extract a single font by xref and add to extracted_fonts dict."""
+        try:
+            extracted = self._doc.extract_font(xref)
+            if not extracted:
+                return
+
+            name, ext, subtype, buffer = extracted
+
+            # Skip fonts with no data
+            if not buffer or len(buffer) < 100:
+                return
+
+            # Only support TrueType and OpenType fonts
+            if ext not in ("ttf", "otf"):
+                return
+
+            # Clean font name (remove subset prefix like "ABCDEF+")
+            clean_name = name.split("+")[-1] if "+" in name else name
+
+            # Skip if already extracted (same clean name)
+            if clean_name in self._extracted_fonts:
+                return
+
+            # Save font file
+            font_path = Path(self._font_temp_dir) / f"{clean_name}.{ext}"
+            with open(font_path, "wb") as f:
+                f.write(buffer)
+
+            # Use relative path for assets, absolute for temp
+            if self._use_relative_paths:
+                # Relative path for Flet assets: "fonts/FontName.ttf"
+                self._extracted_fonts[clean_name] = f"fonts/{clean_name}.{ext}"
+            else:
+                self._extracted_fonts[clean_name] = str(font_path)
+
+        except Exception:
+            # Skip fonts that can't be extracted
+            pass
+
+    @property
+    def fonts(self) -> Dict[str, str]:
+        """Get extracted fonts dict (clean name -> file path).
+
+        Automatically extracts fonts on first access.
+        Use with Flet: page.fonts.update(document.fonts)
+        """
+        return self.extract_fonts()
 
     @property
     def is_encrypted(self) -> bool:
@@ -1293,3 +1653,14 @@ class PyMuPDFBackend(DocumentBackend):
         if self._doc:
             self._doc.close()
         self._pages.clear()
+
+        # Cleanup extracted fonts temp directory
+        if self._font_temp_dir:
+            import shutil
+
+            try:
+                shutil.rmtree(self._font_temp_dir)
+            except Exception:
+                pass
+            self._font_temp_dir = None
+            self._extracted_fonts = None

@@ -40,6 +40,8 @@ class TextBlock:
     bold: bool = False
     italic: bool = False
     gradient: Optional["LinearGradient | RadialGradient"] = None
+    # PyMuPDF font flags for classification (bit 3=mono, bit 2=serif)
+    font_flags: int = 0
 
 
 @dataclass

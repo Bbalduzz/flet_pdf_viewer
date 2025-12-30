@@ -15,30 +15,26 @@ from ..backends.base import PageBackend
 from ..types import AnnotationInfo, LinearGradient, RadialGradient, RenderResult, SelectableChar
 
 
-def _map_font_name(pdf_font: str) -> str:
-    """Map PDF font name to system font family."""
+def _get_font_family(pdf_font: str, flags: int = 0) -> str:
+    """Get font family name for Flet.
+
+    Returns the clean PDF font name, which should match the key in page.fonts
+    if fonts were extracted and registered.
+
+    Args:
+        pdf_font: The PDF font name (may include subset prefix like "ABCDEF+")
+        flags: PyMuPDF span flags (unused, kept for API compatibility)
+
+    Returns:
+        Clean font name like "Effloresce" or "LiberationSerif"
+    """
     if not pdf_font:
         return "sans-serif"
 
-    if "+" in pdf_font:
-        pdf_font = pdf_font.split("+")[-1]
+    # Remove subset prefix (e.g., "PXAAAB+FontName" -> "FontName")
+    clean_name = pdf_font.split("+")[-1] if "+" in pdf_font else pdf_font
 
-    lower = pdf_font.lower().replace("-", "").replace("_", "")
-
-    if "helvetica" in lower or "arial" in lower:
-        return "Helvetica"
-    if "times" in lower:
-        return "Times New Roman"
-    if "courier" in lower:
-        return "Courier New"
-    if "mono" in lower or "fixed" in lower:
-        return "monospace"
-    if "sans" in lower:
-        return "sans-serif"
-    if "serif" in lower:
-        return "serif"
-
-    return "sans-serif"
+    return clean_name
 
 
 class PageRenderer:
@@ -434,7 +430,7 @@ class PageRenderer:
             canvas_y = block.y * self.scale
             font_size = block.font_size * self.scale
 
-            font_family = _map_font_name(block.font_name)
+            font_family = _get_font_family(block.font_name, block.font_flags)
 
             style = ft.TextStyle(
                 size=font_size,

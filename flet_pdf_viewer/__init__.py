@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import io
 from pathlib import Path
-from typing import List, Optional, Tuple, Union
+from typing import Dict, List, Optional, Tuple, Union
 
 from .backends.pymupdf import PyMuPDFBackend
 from .types import (
@@ -104,6 +104,33 @@ class PdfDocument:
             Each value is True if that action is permitted.
         """
         return self._backend.permissions
+
+    def extract_fonts(self, assets_dir: Optional[str] = None) -> Dict[str, str]:
+        """Extract embedded fonts from the PDF.
+
+        Args:
+            assets_dir: Path to Flet assets directory. If provided, fonts are
+                       saved to assets/fonts/ with relative paths that work
+                       with Flet's page.fonts.
+
+        Returns:
+            Dict mapping font names to font paths for page.fonts.
+
+        Example:
+            document = PdfDocument("file.pdf")
+            fonts = document.extract_fonts(assets_dir="assets")
+            page.fonts = fonts
+            # Then run with: ft.app(target=main, assets_dir="assets")
+        """
+        return self._backend.extract_fonts(assets_dir)
+
+    @property
+    def fonts(self) -> Dict[str, str]:
+        """Extracted embedded fonts (uses temp directory).
+
+        For production use, prefer extract_fonts(assets_dir="assets").
+        """
+        return self._backend.fonts
 
     @property
     def toc(self) -> List[TocItem]:
