@@ -38,6 +38,278 @@ from ..types import (
 from .base import DocumentBackend, PageBackend  # noqa: E402
 
 
+def _convert_font_to_ttf(font_data: bytes, font_ext: str, output_path: str) -> bool:
+    """Convert font data to TTF format.
+
+    Flet/Flutter works best with TTF fonts. This function converts various
+    font formats (CFF, OTF, PFA, PFB) to TTF with TrueType outlines.
+
+    Args:
+        font_data: Raw font bytes
+        font_ext: Original extension ('cff', 'otf', 'ttf', 'ttc', 'pfa', 'pfb')
+        output_path: Path to save the TTF file
+
+    Returns:
+        True if conversion succeeded, False otherwise
+    """
+    try:
+        from fontTools.fontBuilder import FontBuilder
+        from fontTools.pens.cu2quPen import Cu2QuPen
+        from fontTools.pens.ttGlyphPen import TTGlyphPen
+        from fontTools.ttLib import TTFont
+
+        # Handle based on format
+        if font_ext == "cff":
+            # Raw CFF data - parse and convert
+            from fontTools.cffLib import CFFFontSet
+            from fontTools.pens.recordingPen import RecordingPen
+
+            cff = CFFFontSet()
+            cff.decompile(io.BytesIO(font_data), None)
+
+            font_name = cff.fontNames[0]
+            top_dict = cff.topDictIndex[0]
+            private_dict = top_dict.Private
+            char_strings = top_dict.CharStrings
+
+            # Get default width for fallback
+            default_width = getattr(private_dict, "defaultWidthX", 500)
+
+            # Build glyph order
+            glyph_order = [".notdef"] if ".notdef" not in top_dict.charset else []
+            glyph_order.extend(g for g in top_dict.charset if g not in glyph_order)
+
+            # Build TTF with quadratic outlines
+            fb = FontBuilder(1000, isTTF=True)
+            fb.setupGlyphOrder(glyph_order)
+
+            # Convert each glyph and extract metrics
+            pen_glyphs = {}
+            metrics = {}
+            for g in glyph_order:
+                tt_pen = TTGlyphPen(None)
+                width = default_width
+                if g in char_strings:
+                    cs = char_strings[g]
+                    try:
+                        # First draw to a recording pen to extract the width
+                        # (drawing populates cs.width)
+                        rec = RecordingPen()
+                        cs.draw(rec, char_strings)
+                        width = getattr(cs, "width", default_width) or default_width
+
+                        # Now convert to quadratic curves for TTF
+                        cu2qu_pen = Cu2QuPen(tt_pen, max_err=1.0, reverse_direction=True)
+                        rec.replay(cu2qu_pen)
+                    except Exception:
+                        pass
+                pen_glyphs[g] = tt_pen.glyph()
+                metrics[g] = (int(width), 0)  # (advance width, left side bearing)
+
+            fb.setupGlyf(pen_glyphs)
+            fb.setupHorizontalMetrics(metrics)
+            fb.setupHorizontalHeader(ascent=800, descent=-200)
+            fb.setupHead(unitsPerEm=1000)
+            fb.setupNameTable({"familyName": font_name, "styleName": "Regular"})
+
+            cmap = {}
+            for g in glyph_order:
+                if len(g) == 1:
+                    cmap[ord(g)] = g
+                elif g == "space":
+                    cmap[32] = "space"
+            fb.setupCharacterMap(cmap)
+            fb.setupOS2()
+            fb.setupPost()
+
+            fb.save(output_path)
+            return True
+
+        elif font_ext in ("pfa", "pfb"):
+            # Type1 PostScript fonts (ASCII or binary)
+            from fontTools.pens.recordingPen import RecordingPen
+            from fontTools.t1Lib import T1Font
+
+            # Type1 fonts from PDFs often lack the cleartomark ending
+            # Add it to make fontTools happy
+            cleartomark_padding = (
+                b"\n"
+                + b"0" * 64 + b"\n"
+                + b"0" * 64 + b"\n"
+                + b"0" * 64 + b"\n"
+                + b"0" * 64 + b"\n"
+                + b"0" * 64 + b"\n"
+                + b"0" * 64 + b"\n"
+                + b"0" * 64 + b"\n"
+                + b"0" * 64 + b"\n"
+                + b"cleartomark\n"
+            )
+            font_data_fixed = font_data + cleartomark_padding
+
+            # Write to temp file (T1Font requires file path)
+            temp_pfa = output_path + ".tmp.pfa"
+            with open(temp_pfa, "wb") as f:
+                f.write(font_data_fixed)
+
+            try:
+                t1 = T1Font(temp_pfa)
+                t1.parse()
+                font_dict = t1.font
+
+                font_name = font_dict.get("FontName", "Unknown")
+                char_strings = font_dict.get("CharStrings", {})
+
+                glyph_order = list(char_strings.keys())
+                if ".notdef" not in glyph_order:
+                    glyph_order.insert(0, ".notdef")
+
+                fb = FontBuilder(1000, isTTF=True)
+                fb.setupGlyphOrder(glyph_order)
+
+                # Convert glyphs and extract metrics
+                pen_glyphs = {}
+                metrics = {}
+                for g in glyph_order:
+                    tt_pen = TTGlyphPen(None)
+                    width = 500  # default
+
+                    if g in char_strings:
+                        cs = char_strings[g]
+                        if cs.needsDecompilation():
+                            cs.decompile()
+
+                        # Extract width from hsbw command: [sbx, width, 'hsbw', ...]
+                        prog = cs.program
+                        if len(prog) >= 3 and prog[2] == "hsbw":
+                            width = prog[1]  # Second arg is width
+                        elif len(prog) >= 5 and prog[4] == "sbw":
+                            width = prog[2]  # sbw: sbx, sby, wx, wy
+
+                        try:
+                            rec = RecordingPen()
+                            cs.draw(rec)
+                            cu2qu_pen = Cu2QuPen(
+                                tt_pen, max_err=1.0, reverse_direction=True
+                            )
+                            rec.replay(cu2qu_pen)
+                        except Exception:
+                            pass
+
+                    pen_glyphs[g] = tt_pen.glyph()
+                    metrics[g] = (int(width), 0)
+
+                fb.setupGlyf(pen_glyphs)
+                fb.setupHorizontalMetrics(metrics)
+                fb.setupHorizontalHeader(ascent=800, descent=-200)
+                fb.setupHead(unitsPerEm=1000)
+                fb.setupNameTable({"familyName": font_name, "styleName": "Regular"})
+
+                # Build cmap
+                cmap = {}
+                for g in glyph_order:
+                    if len(g) == 1:
+                        cmap[ord(g)] = g
+                    elif g == "space":
+                        cmap[32] = "space"
+                fb.setupCharacterMap(cmap)
+                fb.setupOS2()
+                fb.setupPost()
+
+                fb.save(output_path)
+                return True
+            finally:
+                # Clean up temp file
+                if Path(temp_pfa).exists():
+                    Path(temp_pfa).unlink()
+
+        elif font_ext == "otf":
+            # OTF can have CFF or TrueType outlines
+            font = TTFont(io.BytesIO(font_data))
+
+            if "CFF " in font:
+                # OTF with CFF outlines - convert to TTF
+                from fontTools.pens.cu2quPen import Cu2QuPen
+
+                glyph_order = font.getGlyphOrder()
+                cff = font["CFF "].cff
+                top_dict = cff.topDictIndex[0]
+                char_strings = top_dict.CharStrings
+
+                fb = FontBuilder(font["head"].unitsPerEm, isTTF=True)
+                fb.setupGlyphOrder(glyph_order)
+
+                pen_glyphs = {}
+                for g in glyph_order:
+                    tt_pen = TTGlyphPen(None)
+                    if g in char_strings:
+                        try:
+                            cu2qu_pen = Cu2QuPen(
+                                tt_pen, max_err=1.0, reverse_direction=True
+                            )
+                            char_strings[g].draw(cu2qu_pen, char_strings)
+                        except Exception:
+                            pass
+                    pen_glyphs[g] = tt_pen.glyph()
+
+                fb.setupGlyf(pen_glyphs)
+
+                # Copy metrics from original
+                if "hmtx" in font:
+                    fb.setupHorizontalMetrics(dict(font["hmtx"].metrics))
+                else:
+                    fb.setupHorizontalMetrics({g: (500, 0) for g in glyph_order})
+
+                if "hhea" in font:
+                    fb.setupHorizontalHeader(
+                        ascent=font["hhea"].ascent, descent=font["hhea"].descent
+                    )
+                else:
+                    fb.setupHorizontalHeader(ascent=800, descent=-200)
+
+                fb.setupHead(unitsPerEm=font["head"].unitsPerEm)
+
+                # Get font name
+                font_name = glyph_order[1] if len(glyph_order) > 1 else "Unknown"
+                if "name" in font:
+                    for record in font["name"].names:
+                        if record.nameID == 1:
+                            try:
+                                font_name = record.toUnicode()
+                            except Exception:
+                                pass
+                            break
+
+                fb.setupNameTable({"familyName": font_name, "styleName": "Regular"})
+
+                if "cmap" in font:
+                    best_cmap = font.getBestCmap()
+                    if best_cmap:
+                        fb.setupCharacterMap(best_cmap)
+                    else:
+                        fb.setupCharacterMap({})
+                else:
+                    fb.setupCharacterMap({})
+
+                fb.setupOS2()
+                fb.setupPost()
+                fb.save(output_path)
+                return True
+            else:
+                # OTF with TrueType outlines - just save as is
+                font.save(output_path)
+                return True
+
+        elif font_ext in ("ttf", "ttc"):
+            # Already TTF - just write it
+            with open(output_path, "wb") as f:
+                f.write(font_data)
+            return True
+
+        return False
+    except Exception:
+        return False
+
+
 def _color_to_hex(color) -> str:
     """Convert PyMuPDF color to hex string."""
     if color is None:
@@ -1522,7 +1794,11 @@ class PyMuPDFBackend(DocumentBackend):
         return self._extracted_fonts
 
     def _extract_single_font(self, xref: int) -> None:
-        """Extract a single font by xref and add to extracted_fonts dict."""
+        """Extract a single font by xref and add to extracted_fonts dict.
+
+        All fonts are converted to TTF for best Flet/Flutter compatibility.
+        Supports: TTF, TTC, OTF, CFF (Type1C).
+        """
         try:
             extracted = self._doc.extract_font(xref)
             if not extracted:
@@ -1534,8 +1810,8 @@ class PyMuPDFBackend(DocumentBackend):
             if not buffer or len(buffer) < 100:
                 return
 
-            # Only support TrueType and OpenType fonts
-            if ext not in ("ttf", "otf"):
+            # Skip unsupported formats
+            if ext not in ("ttf", "ttc", "otf", "cff", "pfa", "pfb"):
                 return
 
             # Clean font name (remove subset prefix like "ABCDEF+")
@@ -1545,15 +1821,16 @@ class PyMuPDFBackend(DocumentBackend):
             if clean_name in self._extracted_fonts:
                 return
 
-            # Save font file
-            font_path = Path(self._font_temp_dir) / f"{clean_name}.{ext}"
-            with open(font_path, "wb") as f:
-                f.write(buffer)
+            # All fonts are saved as TTF for consistency
+            font_path = Path(self._font_temp_dir) / f"{clean_name}.ttf"
+
+            # Convert to TTF (handles TTF, OTF, CFF)
+            if not _convert_font_to_ttf(buffer, ext, str(font_path)):
+                return
 
             # Use relative path for assets, absolute for temp
             if self._use_relative_paths:
-                # Relative path for Flet assets: "fonts/FontName.ttf"
-                self._extracted_fonts[clean_name] = f"fonts/{clean_name}.{ext}"
+                self._extracted_fonts[clean_name] = f"fonts/{clean_name}.ttf"
             else:
                 self._extracted_fonts[clean_name] = str(font_path)
 

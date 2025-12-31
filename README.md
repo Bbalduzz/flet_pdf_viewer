@@ -20,7 +20,7 @@ A pure Python PDF viewer built with Flet Canvas, no external Flutter packages.
 ## Installation
 
 ```bash
-pip install flet pymupdf
+pip install flet pymupdf fonttools
 ```
 
 ## Quick Start
@@ -172,7 +172,9 @@ page.fonts = fonts
 ```
 
 The font extraction:
-- Extracts TTF/OTF fonts embedded in the PDF
+- Converts all fonts to TTF for Flet/Flutter compatibility
+- Supports TTF, OTF, CFF (Type1C), and Type1 (PFA/PFB) font formats
+- Works with LaTeX/TeX documents using Computer Modern fonts
 - Handles subset font names (e.g., `ABCDEF+Arial` → `Arial`)
 - Falls back to system fonts when extraction fails
 

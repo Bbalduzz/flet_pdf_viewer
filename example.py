@@ -2,6 +2,8 @@
 PDF Viewer - Minimal, elegant design with text selection.
 """
 
+from pathlib import Path
+
 import flet as ft
 
 from flet_pdf_viewer import (
@@ -33,8 +35,8 @@ HIGHLIGHT_COLORS = [
     ("#fecaca", (1.0, 0.79, 0.79)),  # Pink
 ]
 
-PDF_PATH = "TEST - Supporting Student Hall on Arches.pdf"
-# PDF_PATH = "/Users/edoardobalducci/Downloads/magic.pdf"
+# PDF_PATH = "TEST - Supporting Student Hall on Arches.pdf"
+PDF_PATH = Path("demo_files") / "PDF 2.0 image with BPC.pdf"
 
 
 def main(page: ft.Page):
@@ -1288,7 +1290,12 @@ def main(page: ft.Page):
                 content=ft.Row(
                     [
                         ft.Text(lbl, size=11, color=gray1, weight=ft.FontWeight.W_400),
-                        ft.Text(val or "—", size=11, color=white if val else gray2, weight=ft.FontWeight.W_500),
+                        ft.Text(
+                            val or "—",
+                            size=11,
+                            color=white if val else gray2,
+                            weight=ft.FontWeight.W_500,
+                        ),
                     ],
                     alignment=ft.MainAxisAlignment.SPACE_BETWEEN,
                 ),
@@ -1298,7 +1305,9 @@ def main(page: ft.Page):
 
         def section_header(title: str):
             return ft.Container(
-                content=ft.Text(title, size=10, color=gray1, weight=ft.FontWeight.W_600),
+                content=ft.Text(
+                    title, size=10, color=gray1, weight=ft.FontWeight.W_600
+                ),
                 padding=ft.padding.only(top=20, bottom=2),
             )
 
@@ -1309,10 +1318,17 @@ def main(page: ft.Page):
                         ft.Row(
                             [
                                 ft.Container(
-                                    width=6, height=6, border_radius=3,
+                                    width=6,
+                                    height=6,
+                                    border_radius=3,
                                     bgcolor=white if allowed else gray2,
                                 ),
-                                ft.Text(name, size=11, color=white if allowed else gray2, weight=ft.FontWeight.W_400),
+                                ft.Text(
+                                    name,
+                                    size=11,
+                                    color=white if allowed else gray2,
+                                    weight=ft.FontWeight.W_400,
+                                ),
                             ],
                             spacing=8,
                         )
@@ -1344,7 +1360,6 @@ def main(page: ft.Page):
                 label_value("Size", file_size),
                 label_value("Pages", str(document.page_count)),
                 label_value("Dimensions", f"{w:.0f} × {h:.0f} pt"),
-
                 # Metadata
                 section_header("Metadata"),
                 label_value("Title", meta.get("title")),
@@ -1354,24 +1369,28 @@ def main(page: ft.Page):
                 label_value("Producer", meta.get("producer")),
                 label_value("Created", fmt_date(meta.get("creationDate"))),
                 label_value("Modified", fmt_date(meta.get("modDate"))),
-
                 # Security
                 section_header("Security"),
                 label_value("Encrypted", "Yes" if document.is_encrypted else "No"),
-                perm_row([
-                    ("Print", perms.get("print", False)),
-                    ("Copy", perms.get("copy", False)),
-                ]),
-                perm_row([
-                    ("Modify", perms.get("modify", False)),
-                    ("Annotate", perms.get("annotate", False)),
-                ]),
-
+                perm_row(
+                    [
+                        ("Print", perms.get("print", False)),
+                        ("Copy", perms.get("copy", False)),
+                    ]
+                ),
+                perm_row(
+                    [
+                        ("Modify", perms.get("modify", False)),
+                        ("Annotate", perms.get("annotate", False)),
+                    ]
+                ),
                 # Fonts
                 section_header(f"Fonts ({len(fonts)})"),
                 ft.Container(
                     content=ft.Row(
-                        [font_chip(f) for f in fonts] if fonts else [ft.Text("None", size=11, color=gray2)],
+                        [font_chip(f) for f in fonts]
+                        if fonts
+                        else [ft.Text("None", size=11, color=gray2)],
                         wrap=True,
                         spacing=6,
                         run_spacing=6,
@@ -1402,7 +1421,9 @@ def main(page: ft.Page):
             ),
             actions=[
                 ft.Container(
-                    content=ft.Text("Close", size=11, color=white, weight=ft.FontWeight.W_500),
+                    content=ft.Text(
+                        "Close", size=11, color=white, weight=ft.FontWeight.W_500
+                    ),
                     bgcolor=gray3,
                     padding=ft.padding.symmetric(horizontal=16, vertical=8),
                     border_radius=6,
