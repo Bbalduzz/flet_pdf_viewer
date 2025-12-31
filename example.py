@@ -36,7 +36,7 @@ HIGHLIGHT_COLORS = [
 ]
 
 # PDF_PATH = "TEST - Supporting Student Hall on Arches.pdf"
-PDF_PATH = Path("demo_files") / "PDF 2.0 image with BPC.pdf"
+PDF_PATH = Path("demo_files") / "sample-report.pdf"
 
 
 def main(page: ft.Page):
@@ -247,7 +247,6 @@ def main(page: ft.Page):
 
     # Load document
     document = PdfDocument(PDF_PATH)
-    # document = PdfDocument("/Users/edoardobalducci/Downloads/issue8111.pdf")
     print(document.fonts)
     # Register embedded PDF fonts
     page.fonts = document.fonts

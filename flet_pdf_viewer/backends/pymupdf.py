@@ -948,38 +948,46 @@ class PyMuPDFPage(PageBackend):
         return chars
 
     def extract_images(self) -> List[ImageInfo]:
-        """Extract images from the page."""
+        """Extract images from the page.
+
+        Images are rendered in page context to preserve colorspace transformations
+        (CalRGB, ICC profiles, etc.).
+        """
         images = []
-        image_list = self._page.get_images(full=True)
 
-        for img_info in image_list:
-            xref = img_info[0]
+        # Use get_image_info for accurate positions and colorspace info
+        image_info_list = self._page.get_image_info()
+
+        for img_info in image_info_list:
             try:
-                img_rects = self._page.get_image_rects(xref)
-                if not img_rects:
+                bbox = img_info.get("bbox")
+                if not bbox:
                     continue
 
-                rect = img_rects[0]
-                base_image = self._doc._doc.extract_image(xref)
-                if not base_image:
-                    continue
+                width = img_info.get("width", 0)
+                height = img_info.get("height", 0)
 
-                image_data = base_image.get("image")
-                width = base_image.get("width", 0)
-                height = base_image.get("height", 0)
-                ext = base_image.get("ext", "png")
+                # Render the image in page context to apply colorspace transformations
+                # This handles CalRGB, ICC profiles, and other colorspaces correctly
+                clip = pymupdf.Rect(bbox)
 
-                png_path = None
-                if image_data:
-                    png_path = tempfile.mktemp(suffix=f".{ext}")
-                    with open(png_path, "wb") as f:
-                        f.write(image_data)
+                # Calculate scale to get original resolution
+                scale_x = width / clip.width if clip.width > 0 else 1
+                scale_y = height / clip.height if clip.height > 0 else 1
+                scale = max(scale_x, scale_y, 1)  # At least 1x
+
+                mat = pymupdf.Matrix(scale, scale)
+                pix = self._page.get_pixmap(matrix=mat, clip=clip, alpha=False)
+
+                # Save as PNG
+                png_path = tempfile.mktemp(suffix=".png")
+                pix.save(png_path)
 
                 images.append(
                     ImageInfo(
-                        bbox=(rect.x0, rect.y0, rect.x1, rect.y1),
-                        width=width,
-                        height=height,
+                        bbox=(bbox[0], bbox[1], bbox[2], bbox[3]),
+                        width=pix.width,
+                        height=pix.height,
                         png_path=png_path,
                     )
                 )
@@ -1226,8 +1234,22 @@ class PyMuPDFPage(PageBackend):
             fill = drawing.get("fill")
             color = drawing.get("color")
             width = drawing.get("width") or 0
+            fill_opacity = drawing.get("fill_opacity", 1.0)
+            stroke_opacity = drawing.get("stroke_opacity", 1.0)
 
             # Skip if no stroke and no fill
+            if fill is None and color is None:
+                continue
+
+            # Skip fully transparent fills
+            if fill is not None and fill_opacity == 0.0:
+                fill = None
+            # Skip fully transparent strokes
+            if color is not None and stroke_opacity == 0.0:
+                color = None
+                width = 0
+
+            # Skip if both are now None after opacity check
             if fill is None and color is None:
                 continue
 
@@ -1856,6 +1878,19 @@ class PyMuPDFBackend(DocumentBackend):
     def needs_password(self) -> bool:
         """Whether password is needed to access content."""
         return self._doc.needs_pass
+
+    def authenticate(self, password: str) -> bool:
+        """Authenticate with password to unlock the document.
+
+        Args:
+            password: The password to try
+
+        Returns:
+            True if authentication succeeded, False otherwise
+        """
+        if not self._doc.is_encrypted:
+            return True
+        return self._doc.authenticate(password)
 
     @property
     def permissions(self) -> dict:

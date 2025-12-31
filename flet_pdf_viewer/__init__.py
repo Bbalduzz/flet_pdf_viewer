@@ -56,6 +56,7 @@ class PdfDocument:
 
     Methods:
     - get_page_size(index): Get (width, height)
+    - authenticate(password): Unlock encrypted document
     - save(): Save the document
     - close(): Release resources
 
@@ -94,6 +95,17 @@ class PdfDocument:
         Returns False after successful authentication.
         """
         return self._backend.needs_password
+
+    def authenticate(self, password: str) -> bool:
+        """Authenticate with password to unlock the document.
+
+        Args:
+            password: The password to try
+
+        Returns:
+            True if authentication succeeded, False otherwise
+        """
+        return self._backend.authenticate(password)
 
     @property
     def permissions(self) -> dict:
