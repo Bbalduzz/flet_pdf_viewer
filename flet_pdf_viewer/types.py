@@ -4,7 +4,10 @@ Shared data types for the PDF viewer.
 
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, List, Optional, Tuple
+from typing import TYPE_CHECKING, Any, Callable, List, Optional, Tuple
+
+if TYPE_CHECKING:
+    import flet as ft
 
 
 class ViewerMode(Enum):
@@ -253,3 +256,113 @@ Rect = Tuple[float, float, float, float]
 Point = Tuple[float, float]
 Path = List[Point]
 GradientType = Optional[LinearGradient | RadialGradient]
+
+
+# =============================================================================
+# Viewer Configuration Classes
+# =============================================================================
+
+
+@dataclass
+class PageShadow:
+    """Shadow configuration for PDF pages.
+
+    Attributes:
+        blur_radius: Blur radius of the shadow (default: 20)
+        spread_radius: Spread radius of the shadow (default: 0)
+        color: Shadow color with opacity (default: semi-transparent black)
+        offset_x: Horizontal offset (default: 0)
+        offset_y: Vertical offset (default: 0)
+
+    Example:
+        shadow = PageShadow(blur_radius=30, color="#00000050")
+    """
+
+    blur_radius: float = 20
+    spread_radius: float = 0
+    color: str = "#0000004D"  # 30% opacity black
+    offset_x: float = 0
+    offset_y: float = 0
+
+
+@dataclass
+class ViewerStyle:
+    """Visual appearance settings for the PDF viewer.
+
+    Attributes:
+        bgcolor: Background color of pages (default: white)
+        selection_color: Color for text selection highlight
+        page_gap: Gap between pages in continuous/double mode (pixels)
+        page_shadow: Shadow configuration for pages (None to disable)
+        border_radius: Corner radius of pages (default: 2)
+
+    Example:
+        style = ViewerStyle(
+            bgcolor="#f5f5f5",
+            selection_color="#4a90d9",
+            page_gap=20,
+            page_shadow=PageShadow(blur_radius=30),
+        )
+    """
+
+    bgcolor: str = "#ffffff"
+    selection_color: str = "#3390ff"
+    page_gap: int = 16
+    page_shadow: Optional["PageShadow"] = field(default_factory=PageShadow)
+    border_radius: float = 2
+
+
+@dataclass
+class ZoomConfig:
+    """Zoom and scale settings for the PDF viewer.
+
+    Attributes:
+        enabled: Whether interactive zoom (pinch/scroll) is enabled
+        initial: Initial zoom scale (1.0 = 100%)
+        min: Minimum allowed zoom scale
+        max: Maximum allowed zoom scale
+
+    Example:
+        zoom = ZoomConfig(
+            enabled=True,
+            initial=1.0,
+            min=0.5,
+            max=4.0,
+        )
+    """
+
+    enabled: bool = True
+    initial: float = 1.0
+    min: float = 0.25
+    max: float = 5.0
+
+
+@dataclass
+class ViewerCallbacks:
+    """Event callbacks for the PDF viewer.
+
+    All callbacks are optional. Set only the ones you need.
+
+    Attributes:
+        on_page_change: Called when current page changes. Receives page index.
+        on_selection_change: Called when text selection changes. Receives selected text.
+        on_link_click: Called when a link is clicked. Receives LinkInfo.
+                       Return True to prevent default handling.
+        on_text_box_drawn: Called when a text box shape is drawn.
+                           Receives rect coordinates (x0, y0, x1, y1).
+
+    Example:
+        def handle_page(page: int):
+            print(f"Page changed to {page}")
+
+        callbacks = ViewerCallbacks(
+            on_page_change=handle_page,
+        )
+    """
+
+    on_page_change: Optional[Callable[[int], None]] = None
+    on_selection_change: Optional[Callable[[str], None]] = None
+    on_link_click: Optional[Callable[["LinkInfo"], bool]] = None
+    on_text_box_drawn: Optional[Callable[[Tuple[float, float, float, float]], None]] = (
+        None
+    )

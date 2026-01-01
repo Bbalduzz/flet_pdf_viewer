@@ -12,7 +12,10 @@ from flet_pdf_viewer import (
     PdfViewer,
     ShapeType,
     TocItem,
+    ViewerCallbacks,
     ViewerMode,
+    ViewerStyle,
+    ZoomConfig,
 )
 
 COLORS = {
@@ -252,10 +255,10 @@ def main(page: ft.Page):
     page.fonts = document.fonts
 
     viewer = PdfViewer(
-        source=document,
-        scale=1.0,
+        document,
         mode=ViewerMode.SINGLE_PAGE,
-        selection_color=COLORS["selection"],
+        style=ViewerStyle(selection_color=COLORS["selection"]),
+        zoom=ZoomConfig(initial=1.0),
         popup_builder=build_popup,
     )
 

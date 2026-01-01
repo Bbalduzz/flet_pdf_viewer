@@ -369,6 +369,28 @@ class PyMuPDFPage(PageBackend):
             None
         )
         self._text_gradient: Optional[Union[LinearGradient, RadialGradient]] = None
+        # Track temp image files for cleanup
+        self._temp_image_files: List[str] = []
+
+        # Extraction cache - avoids re-parsing PDF on every render
+        self._cached_text_blocks: Optional[List[TextBlock]] = None
+        self._cached_chars: Optional[List[CharInfo]] = None
+        self._cached_graphics: Optional[List[GraphicsInfo]] = None
+        self._cached_images: Optional[List[ImageInfo]] = None
+        self._cached_annotations: Optional[List[AnnotationInfo]] = None
+        self._cached_links: Optional[List[LinkInfo]] = None
+
+    def invalidate_cache(self):
+        """Invalidate all extraction caches. Call after modifying page content."""
+        self._cached_text_blocks = None
+        self._cached_chars = None
+        self._cached_graphics = None
+        self._cached_images = None
+        self._cached_annotations = None
+        self._cached_links = None
+        # Also reset gradient detection since it may have changed
+        self._shadings = None
+        self._text_gradient = None
 
     def _extract_shadings(self) -> Dict[str, Union[LinearGradient, RadialGradient]]:
         """Extract shading/gradient definitions from page resources."""
@@ -750,6 +772,10 @@ class PyMuPDFPage(PageBackend):
 
     def extract_text_blocks(self) -> List[TextBlock]:
         """Extract text blocks with styling."""
+        # Return cached result if available
+        if self._cached_text_blocks is not None:
+            return self._cached_text_blocks
+
         blocks = []
         text_dict = self._page.get_text("dict", flags=pymupdf.TEXT_PRESERVE_WHITESPACE)
 
@@ -880,10 +906,15 @@ class PyMuPDFPage(PageBackend):
                         )
                     )
 
+        self._cached_text_blocks = blocks
         return blocks
 
     def extract_chars(self) -> List[CharInfo]:
         """Extract individual characters."""
+        # Return cached result if available
+        if self._cached_chars is not None:
+            return self._cached_chars
+
         chars = []
         text_dict = self._page.get_text("dict", flags=pymupdf.TEXT_PRESERVE_WHITESPACE)
 
@@ -945,6 +976,7 @@ class PyMuPDFPage(PageBackend):
                                 )
                                 x += char_width
 
+        self._cached_chars = chars
         return chars
 
     def extract_images(self) -> List[ImageInfo]:
@@ -953,6 +985,19 @@ class PyMuPDFPage(PageBackend):
         Images are rendered in page context to preserve colorspace transformations
         (CalRGB, ICC profiles, etc.).
         """
+        # Return cached result if available, but validate files still exist
+        if self._cached_images is not None:
+            # Check if cached image files still exist (may have been cleaned up)
+            if all(
+                Path(img.png_path).exists()
+                for img in self._cached_images
+                if img.png_path
+            ):
+                return self._cached_images
+            # Files were deleted, need to re-extract
+            self._cached_images = None
+            self._temp_image_files.clear()
+
         images = []
 
         # Use get_image_info for accurate positions and colorspace info
@@ -979,9 +1024,10 @@ class PyMuPDFPage(PageBackend):
                 mat = pymupdf.Matrix(scale, scale)
                 pix = self._page.get_pixmap(matrix=mat, clip=clip, alpha=False)
 
-                # Save as PNG
+                # Save as PNG and track for cleanup
                 png_path = tempfile.mktemp(suffix=".png")
                 pix.save(png_path)
+                self._temp_image_files.append(png_path)
 
                 images.append(
                     ImageInfo(
@@ -994,7 +1040,18 @@ class PyMuPDFPage(PageBackend):
             except Exception:
                 continue
 
+        self._cached_images = images
         return images
+
+    def cleanup_temp_files(self):
+        """Clean up temporary image files created by this page."""
+        for path in self._temp_image_files:
+            try:
+                if Path(path).exists():
+                    Path(path).unlink()
+            except Exception:
+                pass
+        self._temp_image_files.clear()
 
     def _extract_gradient_fills(self) -> List[GraphicsInfo]:
         """Extract gradient-filled shapes from content stream."""
@@ -1193,6 +1250,10 @@ class PyMuPDFPage(PageBackend):
 
     def extract_graphics(self) -> List[GraphicsInfo]:
         """Extract vector graphics (rects, lines, paths, curves)."""
+        # Return cached result if available
+        if self._cached_graphics is not None:
+            return self._cached_graphics
+
         graphics = []
 
         # First, add gradient-filled shapes
@@ -1377,10 +1438,15 @@ class PyMuPDFPage(PageBackend):
                     )
                 )
 
+        self._cached_graphics = graphics
         return graphics
 
     def get_annotations(self) -> List[AnnotationInfo]:
         """Get all annotations on the page."""
+        # Return cached result if available
+        if self._cached_annotations is not None:
+            return self._cached_annotations
+
         annotations = []
 
         for annot in self._page.annots() or []:
@@ -1410,10 +1476,15 @@ class PyMuPDFPage(PageBackend):
                 )
             )
 
+        self._cached_annotations = annotations
         return annotations
 
     def get_links(self) -> List[LinkInfo]:
         """Get all links on the page."""
+        # Return cached result if available
+        if self._cached_links is not None:
+            return self._cached_links
+
         links = []
 
         for link in self._page.get_links():
@@ -1475,6 +1546,7 @@ class PyMuPDFPage(PageBackend):
                     )
                 )
 
+        self._cached_links = links
         return links
 
     def search_text(
@@ -1541,24 +1613,28 @@ class PyMuPDFPage(PageBackend):
             annot = self._page.add_highlight_annot(pymupdf.Rect(rect))
             annot.set_colors(stroke=color)
             annot.update()
+        self._cached_annotations = None  # Invalidate annotation cache
 
     def add_underline(self, rects: List[Rect], color: Color) -> None:
         for rect in rects:
             annot = self._page.add_underline_annot(pymupdf.Rect(rect))
             annot.set_colors(stroke=color)
             annot.update()
+        self._cached_annotations = None  # Invalidate annotation cache
 
     def add_strikethrough(self, rects: List[Rect], color: Color) -> None:
         for rect in rects:
             annot = self._page.add_strikeout_annot(pymupdf.Rect(rect))
             annot.set_colors(stroke=color)
             annot.update()
+        self._cached_annotations = None  # Invalidate annotation cache
 
     def add_squiggly(self, rects: List[Rect], color: Color) -> None:
         for rect in rects:
             annot = self._page.add_squiggly_annot(pymupdf.Rect(rect))
             annot.set_colors(stroke=color)
             annot.update()
+        self._cached_annotations = None  # Invalidate annotation cache
 
     def add_text_note(
         self,
@@ -1570,6 +1646,7 @@ class PyMuPDFPage(PageBackend):
         annot = self._page.add_text_annot(pymupdf.Point(point), text, icon=icon)
         annot.set_colors(stroke=color)
         annot.update()
+        self._cached_annotations = None  # Invalidate annotation cache
 
     def add_ink(
         self,
@@ -1582,6 +1659,7 @@ class PyMuPDFPage(PageBackend):
         annot.set_colors(stroke=color)
         annot.set_border(width=width)
         annot.update()
+        self._cached_annotations = None  # Invalidate annotation cache
 
     # Shape annotations
 
@@ -1632,6 +1710,7 @@ class PyMuPDFPage(PageBackend):
         if border_width > 0:
             annot.set_border(width=border_width)
         annot.update()
+        self._cached_annotations = None  # Invalidate annotation cache
 
     def add_rect(
         self,
@@ -1645,6 +1724,7 @@ class PyMuPDFPage(PageBackend):
         annot.set_colors(stroke=stroke_color, fill=fill_color)
         annot.set_border(width=width)
         annot.update()
+        self._cached_annotations = None  # Invalidate annotation cache
 
     def add_circle(
         self,
@@ -1658,6 +1738,7 @@ class PyMuPDFPage(PageBackend):
         annot.set_colors(stroke=stroke_color, fill=fill_color)
         annot.set_border(width=width)
         annot.update()
+        self._cached_annotations = None  # Invalidate annotation cache
 
     def add_line(
         self,
@@ -1681,6 +1762,7 @@ class PyMuPDFPage(PageBackend):
             self._line_end_to_pymupdf(end_style),
         )
         annot.update()
+        self._cached_annotations = None  # Invalidate annotation cache
 
     def add_arrow(
         self,
@@ -1698,6 +1780,7 @@ class PyMuPDFPage(PageBackend):
             start_style=LineEndStyle.NONE,
             end_style=LineEndStyle.CLOSED_ARROW,
         )
+        # Note: cache invalidation happens in add_line
 
     def add_polygon(
         self,
@@ -1714,6 +1797,7 @@ class PyMuPDFPage(PageBackend):
         annot.set_colors(stroke=stroke_color, fill=fill_color)
         annot.set_border(width=width)
         annot.update()
+        self._cached_annotations = None  # Invalidate annotation cache
 
     def add_polyline(
         self,
@@ -1735,15 +1819,21 @@ class PyMuPDFPage(PageBackend):
             self._line_end_to_pymupdf(end_style),
         )
         annot.update()
+        self._cached_annotations = None  # Invalidate annotation cache
 
 
 class PyMuPDFBackend(DocumentBackend):
     """PyMuPDF document backend."""
 
+    # Default LRU cache size for page objects
+    # Should be larger than the render buffer (5+1+5=11 in continuous mode)
+    DEFAULT_PAGE_CACHE_SIZE = 15
+
     def __init__(
         self,
         source: Union[str, Path, bytes, io.BytesIO],
         password: Optional[str] = None,
+        page_cache_size: int = DEFAULT_PAGE_CACHE_SIZE,
     ):
         if isinstance(source, (str, Path)):
             self._path = Path(source)
@@ -1764,7 +1854,11 @@ class PyMuPDFBackend(DocumentBackend):
             if not self._doc.authenticate(password):
                 raise ValueError("Invalid password")
 
-        self._pages: Dict[int, PyMuPDFPage] = {}
+        # LRU cache for page objects using OrderedDict
+        from collections import OrderedDict
+
+        self._pages: OrderedDict[int, PyMuPDFPage] = OrderedDict()
+        self._page_cache_size = max(1, page_cache_size)
 
         # Font extraction state
         self._extracted_fonts: Optional[Dict[str, str]] = None
@@ -1904,10 +1998,18 @@ class PyMuPDFBackend(DocumentBackend):
 
     def get_page(self, index: int) -> PyMuPDFPage:
         if index in self._pages:
+            # Move to end (most recently used) for LRU behavior
+            self._pages.move_to_end(index)
             return self._pages[index]
 
         if index < 0 or index >= len(self._doc):
             raise IndexError(f"Page index {index} out of range")
+
+        # Evict oldest page if cache is full
+        while len(self._pages) >= self._page_cache_size:
+            oldest_index, oldest_page = self._pages.popitem(last=False)
+            # Clean up temp files for evicted page
+            oldest_page.cleanup_temp_files()
 
         page = self._doc[index]
         pdf_page = PyMuPDFPage(self, page, index)
@@ -1962,6 +2064,10 @@ class PyMuPDFBackend(DocumentBackend):
             self._doc.save(str(path))
 
     def close(self) -> None:
+        # Clean up temp image files from all cached pages
+        for page in self._pages.values():
+            page.cleanup_temp_files()
+
         if self._doc:
             self._doc.close()
         self._pages.clear()

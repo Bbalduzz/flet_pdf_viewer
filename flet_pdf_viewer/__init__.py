@@ -25,11 +25,15 @@ from .backends.pymupdf import PyMuPDFBackend
 from .types import (
     Color,
     LineEndStyle,
+    PageShadow,
     SearchOptions,
     SearchResult,
     ShapeType,
     TocItem,
+    ViewerCallbacks,
     ViewerMode,
+    ViewerStyle,
+    ZoomConfig,
 )
 from .viewer import PdfViewer
 
@@ -415,6 +419,7 @@ _original_pdfviewer_init = PdfViewer.__init__
 
 
 def _patched_init(self, source=None, **kwargs):
+    """Patched init that accepts PdfDocument or DocumentBackend."""
     # If source is PdfDocument, unwrap to backend
     if isinstance(source, PdfDocument):
         source = source._get_backend()
@@ -425,13 +430,21 @@ PdfViewer.__init__ = _patched_init
 
 
 __all__ = [
+    # Main classes
     "PdfDocument",
     "PdfViewer",
+    # Configuration
+    "ViewerStyle",
+    "ZoomConfig",
+    "ViewerCallbacks",
+    "PageShadow",
+    # Enums and types
     "ViewerMode",
     "ShapeType",
     "TocItem",
     "SearchResult",
     "SearchOptions",
     "LineEndStyle",
+    # Version
     "__version__",
 ]

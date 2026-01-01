@@ -21,12 +21,16 @@ from .rendering.renderer import PageRenderer
 from .types import (
     Color,
     LinkInfo,
+    PageShadow,
     SearchOptions,
     SearchResult,
     SelectableChar,
     ShapeType,
     TocItem,
+    ViewerCallbacks,
     ViewerMode,
+    ViewerStyle,
+    ZoomConfig,
 )
 
 
@@ -40,46 +44,68 @@ class PdfViewer:
         document = PdfDocument("/path/to/file.pdf")
         viewer = PdfViewer(document)
         page.add(viewer.control)
+
+    With configuration:
+        from flet_pdf_viewer import ViewerStyle, ZoomConfig, ViewerCallbacks
+
+        viewer = PdfViewer(
+            document,
+            page=0,
+            mode=ViewerMode.CONTINUOUS,
+            style=ViewerStyle(bgcolor="#f0f0f0"),
+            zoom=ZoomConfig(initial=1.5, max=10.0),
+            callbacks=ViewerCallbacks(on_page_change=my_handler),
+        )
     """
 
     def __init__(
         self,
         source: Optional[DocumentBackend] = None,
-        current_page: int = 0,
-        scale: float = 1.0,
+        *,
+        # View state
+        page: int = 0,
         mode: ViewerMode = ViewerMode.SINGLE_PAGE,
-        page_gap: int = 16,
-        bgcolor: str = "#ffffff",
-        selection_color: str = "#3390ff",
+        # Grouped configuration
+        style: Optional[ViewerStyle] = None,
+        zoom: Optional[ZoomConfig] = None,
+        callbacks: Optional[ViewerCallbacks] = None,
+        # Customization
         popup_builder: Optional[Callable[["PdfViewer"], ft.Control]] = None,
-        on_page_change: Optional[Callable[[int], None]] = None,
-        on_selection_change: Optional[Callable[[str], None]] = None,
-        on_link_click: Optional[Callable[[LinkInfo], bool]] = None,
-        on_text_box_drawn: Optional[
-            Callable[[Tuple[float, float, float, float]], None]
-        ] = None,
-        interactive_zoom: bool = True,
-        min_scale: float = 0.25,
-        max_scale: float = 5.0,
     ):
+        # Apply defaults for config groups
+        style = style or ViewerStyle()
+        zoom = zoom or ZoomConfig()
+        callbacks = callbacks or ViewerCallbacks()
+
+        # Store source and view state
         self._source = source
-        self._current_page = current_page
-        self._scale = scale
+        self._current_page = page
+        self._scale = zoom.initial
         self._mode = mode
-        self._page_gap = page_gap
-        self._bgcolor = bgcolor
-        self._selection_color = selection_color
+
+        # Store style settings
+        self._page_gap = style.page_gap
+        self._bgcolor = style.bgcolor
+        self._selection_color = style.selection_color
+        self._page_shadow = style.page_shadow
+        self._border_radius = style.border_radius
+
+        # Store zoom settings
+        self._interactive_zoom = zoom.enabled
+        self._min_scale = zoom.min
+        self._max_scale = zoom.max
+
+        # Store callbacks
+        self._on_page_change = callbacks.on_page_change
+        self._on_link_click = callbacks.on_link_click
+        self._on_text_box_drawn = callbacks.on_text_box_drawn
+
+        # Store popup builder
         self._popup_builder = popup_builder
-        self._on_page_change = on_page_change
-        self._on_link_click = on_link_click
-        self._on_text_box_drawn = on_text_box_drawn
-        self._interactive_zoom = interactive_zoom
-        self._min_scale = min_scale
-        self._max_scale = max_scale
 
         # Components
-        self._renderer = PageRenderer(scale)
-        self._selection = SelectionHandler(on_selection_change)
+        self._renderer = PageRenderer(self._scale)
+        self._selection = SelectionHandler(callbacks.on_selection_change)
         self._drawing = DrawingHandler()
         self._shape_drawing = ShapeDrawingHandler()
 
@@ -619,14 +645,48 @@ class PdfViewer:
             page_containers = []
             y_offset = 0.0
 
-            for i in range(self._source.page_count):
-                container, chars, links = self._create_page_container(i, 0, y_offset)
-                page_containers.append(container)
-                selectable_chars.extend(chars)
-                self._links.extend(links)
+            # Lazy loading for large documents: only render pages within a window
+            # For smaller documents (<=20 pages), render all for smooth scrolling
+            # Threshold can be adjusted based on performance needs
+            lazy_load_threshold = 20
+            use_lazy_loading = self._source.page_count > lazy_load_threshold
 
+            if use_lazy_loading:
+                # Render current page +/- buffer, use placeholders for rest
+                render_buffer = 5  # Larger buffer for better scroll experience
+                render_start = max(0, self._current_page - render_buffer)
+                render_end = min(
+                    self._source.page_count, self._current_page + render_buffer + 1
+                )
+            else:
+                # Render all pages for small documents
+                render_start = 0
+                render_end = self._source.page_count
+
+            for i in range(self._source.page_count):
                 page = self._source.get_page(i)
-                y_offset += page.height * self._scale + self._page_gap
+                page_height = page.height * self._scale
+                page_width = page.width * self._scale
+
+                if render_start <= i < render_end:
+                    # Fully render pages in the visible window
+                    container, chars, links = self._create_page_container(
+                        i, 0, y_offset
+                    )
+                    selectable_chars.extend(chars)
+                    self._links.extend(links)
+                else:
+                    # Placeholder for pages outside visible window
+                    container = ft.Container(
+                        width=page_width,
+                        height=page_height,
+                        bgcolor=self._bgcolor,
+                        border_radius=self._border_radius,
+                        shadow=self._create_box_shadow(),
+                    )
+
+                page_containers.append(container)
+                y_offset += page_height + self._page_gap
 
             content = ft.Column(
                 controls=page_containers,
@@ -670,6 +730,18 @@ class PdfViewer:
         self._selection.set_selectable_chars(selectable_chars)
         self._update_link_overlay()
         return content
+
+    def _create_box_shadow(self) -> Optional[ft.BoxShadow]:
+        """Create a BoxShadow from the page shadow configuration."""
+        if self._page_shadow is None:
+            return None
+
+        return ft.BoxShadow(
+            blur_radius=self._page_shadow.blur_radius,
+            spread_radius=self._page_shadow.spread_radius,
+            color=self._page_shadow.color,
+            offset=ft.Offset(self._page_shadow.offset_x, self._page_shadow.offset_y),
+        )
 
     def _create_page_container(
         self, page_index: int, offset_x: float = 0, offset_y: float = 0
@@ -718,12 +790,8 @@ class PdfViewer:
             width=canvas_width,
             height=canvas_height,
             bgcolor=self._bgcolor,
-            border_radius=2,
-            shadow=ft.BoxShadow(
-                spread_radius=0,
-                blur_radius=20,
-                color=ft.Colors.with_opacity(0.3, "#000000"),
-            ),
+            border_radius=self._border_radius,
+            shadow=self._create_box_shadow(),
         )
 
         chars = self._renderer.build_selectable_chars(

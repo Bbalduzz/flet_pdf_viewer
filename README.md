@@ -39,6 +39,40 @@ def main(page: ft.Page):
 ft.app(main)
 ```
 
+### With Configuration
+
+```python
+from flet_pdf_viewer import (
+    PdfDocument, PdfViewer, ViewerMode,
+    ViewerStyle, ZoomConfig, ViewerCallbacks, PageShadow
+)
+
+def handle_page_change(page_index: int):
+    print(f"Page changed to {page_index}")
+
+viewer = PdfViewer(
+    document,
+    page=0,
+    mode=ViewerMode.CONTINUOUS,
+    style=ViewerStyle(
+        bgcolor="#f5f5f5",
+        selection_color="#4a90d9",
+        page_gap=20,
+        page_shadow=PageShadow(blur_radius=30, color="#00000066"),
+        border_radius=8,
+    ),
+    zoom=ZoomConfig(
+        enabled=True,
+        initial=1.0,
+        min=0.5,
+        max=4.0,
+    ),
+    callbacks=ViewerCallbacks(
+        on_page_change=handle_page_change,
+    ),
+)
+```
+
 ## API Reference
 
 ### PdfDocument
@@ -80,16 +114,52 @@ document = PdfDocument(source)  # str, Path, bytes, or BytesIO
 
 ```python
 viewer = PdfViewer(
-    source=document,           # PdfDocument
-    current_page=0,            # Initial page
-    scale=1.0,                 # Zoom level
+    source,                    # PdfDocument or DocumentBackend
+    *,                         # Keyword-only arguments below
+    page=0,                    # Initial page index
     mode=ViewerMode.SINGLE_PAGE,
-    page_gap=16,               # Gap between pages (continuous/double)
-    bgcolor="#ffffff",         # Page background
-    selection_color="#3390ff", # Selection highlight color
+    style=ViewerStyle(...),    # Visual appearance (optional)
+    zoom=ZoomConfig(...),      # Zoom settings (optional)
+    callbacks=ViewerCallbacks(...),  # Event handlers (optional)
     popup_builder=None,        # Custom popup function
-    on_page_change=None,       # Callback(page_index)
-    on_selection_change=None,  # Callback(selected_text)
+)
+```
+
+### Configuration Classes
+
+```python
+# Visual appearance
+ViewerStyle(
+    bgcolor="#ffffff",         # Page background color
+    selection_color="#3390ff", # Text selection highlight
+    page_gap=16,               # Gap between pages (px)
+    page_shadow=PageShadow(),  # Shadow config (or None)
+    border_radius=2,           # Page corner radius
+)
+
+# Page shadow
+PageShadow(
+    blur_radius=20,            # Shadow blur
+    spread_radius=0,           # Shadow spread
+    color="#0000004D",         # Shadow color (with opacity)
+    offset_x=0,                # Horizontal offset
+    offset_y=0,                # Vertical offset
+)
+
+# Zoom settings
+ZoomConfig(
+    enabled=True,              # Enable interactive zoom
+    initial=1.0,               # Initial scale (1.0 = 100%)
+    min=0.25,                  # Minimum zoom
+    max=5.0,                   # Maximum zoom
+)
+
+# Event callbacks
+ViewerCallbacks(
+    on_page_change=None,       # Callback(page_index: int)
+    on_selection_change=None,  # Callback(selected_text: str)
+    on_link_click=None,        # Callback(link: LinkInfo) -> bool
+    on_text_box_drawn=None,    # Callback(rect: tuple)
 )
 ```
 
