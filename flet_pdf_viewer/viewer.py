@@ -8,7 +8,10 @@ from __future__ import annotations
 
 import os
 import webbrowser
-from typing import Callable, Dict, List, Optional, Tuple
+from typing import TYPE_CHECKING, Callable, Dict, List, Optional, Tuple, Union
+
+if TYPE_CHECKING:
+    from . import PdfDocument
 
 import flet as ft
 import flet.canvas as cv
@@ -60,7 +63,7 @@ class PdfViewer:
 
     def __init__(
         self,
-        source: Optional[DocumentBackend] = None,
+        source: Union[DocumentBackend, "PdfDocument", None] = None,
         *,
         # View state
         page: int = 0,
@@ -257,6 +260,27 @@ class PdfViewer:
         if self._source and 0 <= page_index < self._source.page_count:
             self.current_page = page_index
             return True
+        return False
+
+    def goto_destination(self, name: str) -> bool:
+        """Go to a named destination/anchor.
+
+        Args:
+            name: The named destination (e.g., "chapter1", "section2.3")
+
+        Returns:
+            True if destination was found and navigated to, False otherwise
+
+        Example:
+            viewer.goto_destination("chapter1")
+            viewer.goto_destination("page.5")  # Some PDFs use this format
+        """
+        if not self._source:
+            return False
+
+        page_index = self._source.resolve_named_destination(name)
+        if page_index is not None:
+            return self.goto(page_index)
         return False
 
     def zoom_in(self, factor: float = 1.25):
@@ -1510,9 +1534,8 @@ class PdfViewer:
                 pass
 
         elif link.kind == "named" and link.name:
-            # Named destination - try to resolve
-            # Most PDFs use page numbers directly, so this is less common
-            pass
+            # Named destination - resolve and navigate
+            self.goto_destination(link.name)
 
         elif link.kind == "launch" and link.file:
             # Launch external file - security risk, don't handle by default

@@ -361,9 +361,8 @@ def _get_font_family(pdf_font: str, flags: int = 0) -> str:
 class PyMuPDFPage(PageBackend):
     """PyMuPDF page implementation."""
 
-    def __init__(self, doc: "PyMuPDFBackend", page: pymupdf.Page, index: int):
+    def __init__(self, doc: "PyMuPDFBackend", index: int):
         self._doc = doc
-        self._page = page
         self._index = index
         self._shadings: Optional[Dict[str, Union[LinearGradient, RadialGradient]]] = (
             None
@@ -379,6 +378,11 @@ class PyMuPDFPage(PageBackend):
         self._cached_images: Optional[List[ImageInfo]] = None
         self._cached_annotations: Optional[List[AnnotationInfo]] = None
         self._cached_links: Optional[List[LinkInfo]] = None
+
+    @property
+    def _page(self) -> pymupdf.Page:
+        """Get fresh page object from document - avoids stale references."""
+        return self._doc._doc[self._index]
 
     def invalidate_cache(self):
         """Invalidate all extraction caches. Call after modifying page content."""
@@ -2011,8 +2015,7 @@ class PyMuPDFBackend(DocumentBackend):
             # Clean up temp files for evicted page
             oldest_page.cleanup_temp_files()
 
-        page = self._doc[index]
-        pdf_page = PyMuPDFPage(self, page, index)
+        pdf_page = PyMuPDFPage(self, index)
         self._pages[index] = pdf_page
         return pdf_page
 
@@ -2050,6 +2053,62 @@ class PyMuPDFBackend(DocumentBackend):
         except Exception:
             return {}
 
+    def resolve_named_destination(self, name: str) -> Optional[int]:
+        """Resolve a named destination to a page index.
+
+        Args:
+            name: The named destination (e.g., "chapter1", "section2.3")
+
+        Returns:
+            Page index (0-based) if found, None otherwise
+        """
+        try:
+            # Try resolving as a named destination link
+            # PyMuPDF accepts "#name" format for named destinations
+            link_dest = self._doc.resolve_link(f"#{name}")
+            if link_dest and link_dest.get("page") is not None:
+                return link_dest["page"]
+
+            # Also try without the # prefix (some PDFs use this)
+            link_dest = self._doc.resolve_link(name)
+            if link_dest and link_dest.get("page") is not None:
+                return link_dest["page"]
+
+            return None
+        except Exception:
+            return None
+
+    def get_named_destinations(self) -> Dict[str, int]:
+        """Get all named destinations in the document.
+
+        Returns:
+            Dict mapping destination names to page indices (0-based)
+        """
+        destinations = {}
+        try:
+            # PyMuPDF stores named destinations in the PDF's name dictionary
+            # Access via the document's PDF catalog
+            if hasattr(self._doc, "pdf_catalog"):
+                catalog = self._doc.pdf_catalog()
+                if catalog:
+                    names = self._doc.xref_get_key(catalog, "Names")
+                    if names and names[0] == "dict":
+                        dests = self._doc.xref_get_key(catalog, "Dests")
+                        # Parse destinations...
+
+            # Alternative: iterate through outline and collect destinations
+            toc = self._doc.get_toc(simple=False)
+            for item in toc:
+                if len(item) > 3 and item[3]:  # Has destination info
+                    dest_info = item[3]
+                    if isinstance(dest_info, dict) and "name" in dest_info:
+                        page_num = item[2] - 1 if item[2] > 0 else 0
+                        destinations[dest_info["name"]] = page_num
+        except Exception:
+            pass
+
+        return destinations
+
     def save(self, path: Optional[Union[str, Path]] = None) -> None:
         if path is None:
             if self._path is None:
@@ -2082,3 +2141,305 @@ class PyMuPDFBackend(DocumentBackend):
                 pass
             self._font_temp_dir = None
             self._extracted_fonts = None
+
+    # =========================================================================
+    # Page Manipulation Methods
+    # =========================================================================
+
+    def _invalidate_page_cache(self, from_index: int = 0):
+        """Invalidate page cache from a given index onwards."""
+        # Remove cached pages that may have shifted
+        indices_to_remove = [i for i in self._pages if i >= from_index]
+        for i in indices_to_remove:
+            self._pages[i].cleanup_temp_files()
+            del self._pages[i]
+
+    def rotate_page(self, page_index: int, angle: int) -> None:
+        """Rotate a page by the specified angle.
+
+        Args:
+            page_index: Page index (0-based)
+            angle: Rotation angle (must be 0, 90, 180, or 270)
+
+        Raises:
+            ValueError: If angle is not valid
+            IndexError: If page_index is out of range
+        """
+        if angle not in (0, 90, 180, 270):
+            raise ValueError(f"Angle must be 0, 90, 180, or 270, got {angle}")
+        if page_index < 0 or page_index >= len(self._doc):
+            raise IndexError(f"Page index {page_index} out of range")
+
+        page = self._doc[page_index]
+        page.set_rotation(angle)
+
+        # Invalidate cache for this page
+        if page_index in self._pages:
+            self._pages[page_index].cleanup_temp_files()
+            del self._pages[page_index]
+
+    def rotate_page_by(self, page_index: int, angle: int) -> None:
+        """Rotate a page by adding to current rotation.
+
+        Args:
+            page_index: Page index (0-based)
+            angle: Angle to add (must be multiple of 90)
+        """
+        if angle % 90 != 0:
+            raise ValueError(f"Angle must be multiple of 90, got {angle}")
+        if page_index < 0 or page_index >= len(self._doc):
+            raise IndexError(f"Page index {page_index} out of range")
+
+        page = self._doc[page_index]
+        current = page.rotation
+        new_angle = (current + angle) % 360
+        page.set_rotation(new_angle)
+
+        # Invalidate cache for this page
+        if page_index in self._pages:
+            self._pages[page_index].cleanup_temp_files()
+            del self._pages[page_index]
+
+    def add_blank_page(
+        self,
+        width: float = 612,
+        height: float = 792,
+        index: int = -1,
+    ) -> int:
+        """Add a blank page to the document.
+
+        Args:
+            width: Page width in points (default: 8.5" = 612pt)
+            height: Page height in points (default: 11" = 792pt)
+            index: Where to insert (-1 = end, 0 = beginning)
+
+        Returns:
+            Index of the new page
+        """
+        if index < 0 or index >= len(self._doc):
+            # Append at end
+            self._doc.new_page(width=width, height=height)
+            return len(self._doc) - 1
+        else:
+            # Insert at position
+            self._doc.new_page(pno=index, width=width, height=height)
+            self._invalidate_page_cache(index)
+            return index
+
+    def delete_page(self, page_index: int) -> None:
+        """Delete a page from the document.
+
+        Args:
+            page_index: Page index to delete (0-based)
+        """
+        if page_index < 0 or page_index >= len(self._doc):
+            raise IndexError(f"Page index {page_index} out of range")
+
+        # Clean up cached page
+        if page_index in self._pages:
+            self._pages[page_index].cleanup_temp_files()
+
+        self._doc.delete_page(page_index)
+        self._invalidate_page_cache(page_index)
+
+    def delete_pages(self, from_index: int, to_index: int) -> None:
+        """Delete a range of pages from the document.
+
+        Args:
+            from_index: Start page index (inclusive)
+            to_index: End page index (inclusive)
+        """
+        if from_index < 0 or to_index >= len(self._doc) or from_index > to_index:
+            raise IndexError(f"Invalid page range: {from_index}-{to_index}")
+
+        self._doc.delete_pages(from_page=from_index, to_page=to_index)
+        self._invalidate_page_cache(from_index)
+
+    def move_page(self, from_index: int, to_index: int) -> None:
+        """Move a page to a new position.
+
+        Args:
+            from_index: Current page index
+            to_index: Target position (page will be inserted before this index)
+        """
+        if from_index < 0 or from_index >= len(self._doc):
+            raise IndexError(f"Source page index {from_index} out of range")
+        if to_index < 0 or to_index > len(self._doc):
+            raise IndexError(f"Target index {to_index} out of range")
+
+        self._doc.move_page(from_index, to_index)
+        self._invalidate_page_cache(min(from_index, to_index))
+
+    def copy_page(self, page_index: int, to_index: int = -1) -> int:
+        """Copy a page within the document.
+
+        Args:
+            page_index: Page to copy
+            to_index: Where to insert copy (-1 = after original)
+
+        Returns:
+            Index of the new page
+        """
+        if page_index < 0 or page_index >= len(self._doc):
+            raise IndexError(f"Page index {page_index} out of range")
+
+        if to_index < 0:
+            to_index = page_index + 1
+
+        self._doc.copy_page(page_index, to_index)
+        self._invalidate_page_cache(to_index)
+        return to_index
+
+    def resize_page(
+        self,
+        page_index: int,
+        width: float,
+        height: float,
+    ) -> None:
+        """Resize a page (changes the media box).
+
+        Args:
+            page_index: Page index
+            width: New width in points
+            height: New height in points
+        """
+        if page_index < 0 or page_index >= len(self._doc):
+            raise IndexError(f"Page index {page_index} out of range")
+
+        page = self._doc[page_index]
+        page.set_mediabox(pymupdf.Rect(0, 0, width, height))
+
+        # Invalidate cache for this page
+        if page_index in self._pages:
+            self._pages[page_index].cleanup_temp_files()
+            del self._pages[page_index]
+
+    def crop_page(
+        self,
+        page_index: int,
+        left: float,
+        top: float,
+        right: float,
+        bottom: float,
+    ) -> None:
+        """Crop a page (sets the crop box).
+
+        Args:
+            page_index: Page index
+            left: Left margin to crop (points from left edge)
+            top: Top margin to crop (points from top edge)
+            right: Right margin to crop (points from right edge)
+            bottom: Bottom margin to crop (points from bottom edge)
+        """
+        if page_index < 0 or page_index >= len(self._doc):
+            raise IndexError(f"Page index {page_index} out of range")
+
+        page = self._doc[page_index]
+        rect = page.rect
+        crop_rect = pymupdf.Rect(
+            rect.x0 + left,
+            rect.y0 + top,
+            rect.x1 - right,
+            rect.y1 - bottom,
+        )
+        page.set_cropbox(crop_rect)
+
+        # Invalidate cache for this page
+        if page_index in self._pages:
+            self._pages[page_index].cleanup_temp_files()
+            del self._pages[page_index]
+
+    def insert_pdf(
+        self,
+        source: Union[str, Path, "PyMuPDFBackend"],
+        from_page: int = 0,
+        to_page: int = -1,
+        start_at: int = -1,
+    ) -> int:
+        """Insert pages from another PDF.
+
+        Args:
+            source: Path to PDF file or another PyMuPDFBackend
+            from_page: First page to copy from source (0-based)
+            to_page: Last page to copy (-1 = last page)
+            start_at: Where to insert in this document (-1 = end)
+
+        Returns:
+            Number of pages inserted
+        """
+        if isinstance(source, (str, Path)):
+            src_doc = pymupdf.open(str(source))
+            close_src = True
+        elif isinstance(source, PyMuPDFBackend):
+            src_doc = source._doc
+            close_src = False
+        else:
+            raise TypeError(f"Invalid source type: {type(source)}")
+
+        try:
+            if to_page < 0:
+                to_page = len(src_doc) - 1
+
+            if start_at < 0:
+                start_at = len(self._doc)
+
+            pages_before = len(self._doc)
+            self._doc.insert_pdf(
+                src_doc,
+                from_page=from_page,
+                to_page=to_page,
+                start_at=start_at,
+            )
+            pages_inserted = len(self._doc) - pages_before
+
+            self._invalidate_page_cache(start_at)
+            return pages_inserted
+        finally:
+            if close_src:
+                src_doc.close()
+
+    def extract_pages(
+        self,
+        output_path: Union[str, Path],
+        page_indices: List[int],
+    ) -> None:
+        """Extract specific pages to a new PDF file.
+
+        Args:
+            output_path: Path for the new PDF
+            page_indices: List of page indices to extract
+        """
+        new_doc = pymupdf.open()
+        try:
+            for idx in page_indices:
+                if idx < 0 or idx >= len(self._doc):
+                    raise IndexError(f"Page index {idx} out of range")
+                new_doc.insert_pdf(self._doc, from_page=idx, to_page=idx)
+            new_doc.save(str(output_path))
+        finally:
+            new_doc.close()
+
+    def split_pdf(
+        self,
+        output_dir: Union[str, Path],
+        prefix: str = "page_",
+    ) -> List[str]:
+        """Split PDF into individual page files.
+
+        Args:
+            output_dir: Directory to save individual pages
+            prefix: Filename prefix for each page
+
+        Returns:
+            List of created file paths
+        """
+        output_dir = Path(output_dir)
+        output_dir.mkdir(parents=True, exist_ok=True)
+
+        created_files = []
+        for i in range(len(self._doc)):
+            output_path = output_dir / f"{prefix}{i:04d}.pdf"
+            self.extract_pages(output_path, [i])
+            created_files.append(str(output_path))
+
+        return created_files

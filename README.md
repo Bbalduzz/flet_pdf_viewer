@@ -13,9 +13,12 @@ A pure Python PDF viewer built with Flet Canvas, no external Flutter packages.
 - **Ink drawing**: freehand annotations with live preview
 - **Search**: find text across all pages with result navigation
 - **Table of Contents**: navigate document outline
+- **Named destinations**: navigate to PDF anchors/bookmarks by name
+- **Page manipulation**: rotate, add, delete, move, copy, resize, crop pages
+- **PDF operations**: merge PDFs, extract pages, split into individual files
 - **View modes**: single page, continuous scroll, double page
 - **Zoom**: scale-based rendering
-- **Save**: persist annotations back to PDF
+- **Save**: persist all changes back to PDF
 
 ## Installation
 
@@ -110,6 +113,26 @@ document = PdfDocument(source)  # str, Path, bytes, or BytesIO
 - `add_polygon(page_index, points, stroke_color, fill_color, width)`
 - `add_polyline(page_index, points, color, width, start_style, end_style)`
 
+**Page manipulation methods:**
+- `rotate_page(page_index, angle)` - Set rotation (0, 90, 180, 270)
+- `rotate_page_by(page_index, angle)` - Add to current rotation
+- `add_blank_page(width, height, index)` - Insert blank page
+- `delete_page(page_index)` - Remove a page
+- `delete_pages(from_index, to_index)` - Remove page range
+- `move_page(from_index, to_index)` - Reorder pages
+- `copy_page(page_index, to_index)` - Duplicate a page
+- `resize_page(page_index, width, height)` - Change page dimensions
+- `crop_page(page_index, left, top, right, bottom)` - Crop margins
+
+**PDF merge/split methods:**
+- `insert_pdf(source, from_page, to_page, start_at)` - Insert pages from another PDF
+- `extract_pages(output_path, page_indices)` - Save specific pages to new PDF
+- `split_pdf(output_dir, prefix)` - Split into individual page files
+
+**Named destination methods:**
+- `resolve_destination(name)` - Get page index for named destination
+- `get_destinations()` - Get all named destinations as dict
+
 ### PdfViewer
 
 ```python
@@ -178,6 +201,7 @@ ViewerCallbacks(
 - `next_page()` - Go to next page
 - `previous_page()` - Go to previous page
 - `goto(page_index)` - Jump to specific page
+- `goto_destination(name)` - Jump to named destination/anchor
 - `zoom_in(factor=1.25)`
 - `zoom_out(factor=1.25)`
 
@@ -296,6 +320,76 @@ def my_popup(viewer):
     )
 
 viewer = PdfViewer(document, popup_builder=my_popup)
+```
+
+## Page Manipulation
+
+Rotate, add, delete, move, and resize pages:
+
+```python
+document = PdfDocument("input.pdf")
+
+# Rotate pages
+document.rotate_page(0, 90)       # Set first page to 90°
+document.rotate_page_by(1, 180)   # Add 180° to second page
+
+# Add and delete pages
+document.add_blank_page()                    # Add blank page at end
+document.add_blank_page(595, 842, index=0)   # Add A4 page at beginning
+document.delete_page(5)                      # Delete page 5
+document.delete_pages(10, 15)                # Delete pages 10-15
+
+# Reorder pages
+document.move_page(5, 0)          # Move page 5 to beginning
+document.copy_page(0)             # Duplicate first page
+
+# Resize and crop
+document.resize_page(0, 612, 792)            # Resize to Letter
+document.crop_page(0, 72, 72, 72, 72)        # Crop 1" from all sides
+
+document.save()  # Save changes
+```
+
+## PDF Merge and Split
+
+Combine PDFs, extract pages, or split into individual files:
+
+```python
+document = PdfDocument("main.pdf")
+
+# Merge: Insert pages from another PDF
+document.insert_pdf("appendix.pdf")                      # Append all pages
+document.insert_pdf("cover.pdf", start_at=0)             # Insert at beginning
+document.insert_pdf("chapter2.pdf", from_page=0, to_page=10, start_at=5)
+
+# Extract specific pages to new PDF
+document.extract_pages("summary.pdf", [0, 5, 10])        # Pages 0, 5, 10
+
+# Split into individual page files
+files = document.split_pdf("./pages/", prefix="page_")
+# Creates: pages/page_0000.pdf, pages/page_0001.pdf, ...
+
+document.save()
+```
+
+## Named Destinations
+
+Navigate to PDF anchors/bookmarks by name:
+
+```python
+# In viewer - jump to named destination
+viewer.goto_destination("chapter1")
+viewer.goto_destination("section2.3")
+
+# In document - resolve destination to page number
+page_idx = document.resolve_destination("appendix-a")
+if page_idx is not None:
+    print(f"Appendix A is on page {page_idx}")
+
+# List all named destinations
+destinations = document.get_destinations()
+for name, page in destinations.items():
+    print(f"{name} -> page {page}")
 ```
 
 ## Architecture

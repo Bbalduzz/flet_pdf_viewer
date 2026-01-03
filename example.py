@@ -7,12 +7,9 @@ from pathlib import Path
 import flet as ft
 
 from flet_pdf_viewer import (
-    LineEndStyle,
     PdfDocument,
     PdfViewer,
-    ShapeType,
     TocItem,
-    ViewerCallbacks,
     ViewerMode,
     ViewerStyle,
     ZoomConfig,
@@ -39,7 +36,7 @@ HIGHLIGHT_COLORS = [
 ]
 
 # PDF_PATH = "TEST - Supporting Student Hall on Arches.pdf"
-PDF_PATH = Path("demo_files") / "sample-report.pdf"
+PDF_PATH = Path("demo_files") / "multicolumn.pdf"
 
 
 def main(page: ft.Page):
@@ -267,6 +264,7 @@ def main(page: ft.Page):
     drawing_active = [False]  # Use list to allow mutation in nested functions
     search_visible = [False]  # Search bar visibility
     shapes_menu_visible = [False]  # Shapes dropdown visibility
+    edit_menu_visible = [False]  # Page edit toolbar visibility
 
     # Text annotation system - annotations that can be selected, moved, and edited
     # Each annotation: {id, x, y, text, selected, page_index, editing}
@@ -716,12 +714,90 @@ def main(page: ft.Page):
     def toggle_shapes_menu(e):
         """Toggle shapes toolbar visibility."""
         shapes_menu_visible[0] = not shapes_menu_visible[0]
+        if shapes_menu_visible[0]:
+            edit_menu_visible[0] = False  # Close edit menu
         rebuild_toolbar()
         # Also rebuild shapes toolbar if it exists
         try:
             rebuild_shapes_toolbar()
+            rebuild_edit_toolbar()
         except NameError:
             pass
+
+    def toggle_edit_menu(e):
+        """Toggle page edit toolbar visibility."""
+        edit_menu_visible[0] = not edit_menu_visible[0]
+        if edit_menu_visible[0]:
+            shapes_menu_visible[0] = False  # Close shapes menu
+        rebuild_toolbar()
+        try:
+            rebuild_shapes_toolbar()
+            rebuild_edit_toolbar()
+        except NameError:
+            pass
+
+    # Page manipulation handlers
+    def rotate_page_left(e):
+        """Rotate current page 90° counter-clockwise."""
+        document.rotate_page_by(viewer.current_page, -90)
+        viewer._update_content()
+        page.update()
+
+    def rotate_page_right(e):
+        """Rotate current page 90° clockwise."""
+        document.rotate_page_by(viewer.current_page, 90)
+        viewer._update_content()
+        page.update()
+
+    def delete_current_page(e):
+        """Delete the current page."""
+        if document.page_count <= 1:
+            return  # Don't delete the last page
+        current = viewer.current_page
+        document.delete_page(current)
+        # Navigate to previous page if we deleted the last page
+        if current >= document.page_count:
+            viewer.goto(document.page_count - 1)
+        viewer._update_content()
+        rebuild_toolbar()
+        page.update()
+
+    def add_blank_page_after(e):
+        """Add a blank page after current page."""
+        current = viewer.current_page
+        w, h = document.get_page_size(current)
+        document.add_blank_page(width=w, height=h, index=current + 1)
+        viewer.goto(current + 1)
+        viewer._update_content()
+        rebuild_toolbar()
+        page.update()
+
+    def duplicate_current_page(e):
+        """Duplicate the current page."""
+        current = viewer.current_page
+        new_idx = document.copy_page(current)
+        viewer.goto(new_idx)
+        viewer._update_content()
+        rebuild_toolbar()
+        page.update()
+
+    def move_page_up(e):
+        """Move current page one position earlier."""
+        current = viewer.current_page
+        if current > 0:
+            document.move_page(current, current - 1)
+            viewer.goto(current - 1)
+            viewer._update_content()
+            page.update()
+
+    def move_page_down(e):
+        """Move current page one position later."""
+        current = viewer.current_page
+        if current < document.page_count - 1:
+            document.move_page(current, current + 2)
+            viewer.goto(current + 1)
+            viewer._update_content()
+            page.update()
 
     save_icon_ref = ft.Ref[ft.Icon]()
 
@@ -1236,6 +1312,31 @@ def main(page: ft.Page):
             )
         )
 
+        # Edit/Page manipulation toggle button
+        controls.append(
+            ft.Container(
+                content=ft.Icon(
+                    ft.Icons.EDIT_DOCUMENT,
+                    size=16,
+                    color=COLORS["text"]
+                    if edit_menu_visible[0]
+                    else COLORS["text_secondary"],
+                ),
+                width=40,
+                height=40,
+                border_radius=8,
+                alignment=ft.alignment.center,
+                on_click=toggle_edit_menu,
+                bgcolor=COLORS["surface"],
+                border=ft.border.all(
+                    1,
+                    COLORS["selection"] if edit_menu_visible[0] else COLORS["border"],
+                ),
+                margin=ft.margin.only(left=8),
+                tooltip="Edit Pages",
+            )
+        )
+
         controls.append(ft.Container(expand=True))
 
         # Info button (right side)
@@ -1544,6 +1645,148 @@ def main(page: ft.Page):
         if shapes_toolbar_ref.current and shapes_toolbar_ref.current.page:
             shapes_toolbar_ref.current.update()
 
+    # Edit/Page manipulation toolbar
+    edit_toolbar_ref = ft.Ref[ft.Container]()
+    edit_toolbar_row_ref = ft.Ref[ft.Row]()
+
+    def build_edit_toolbar():
+        """Build the page edit toolbar row."""
+
+        def edit_btn(icon, label, on_click_fn, tooltip=None, disabled=False):
+            """Create an edit action button."""
+
+            def on_hover(e):
+                if not disabled:
+                    e.control.bgcolor = (
+                        COLORS["surface_hover"] if e.data == "true" else "transparent"
+                    )
+                    if e.control.page:
+                        e.control.update()
+
+            return ft.Container(
+                content=ft.Column(
+                    [
+                        ft.Icon(
+                            icon,
+                            size=20,
+                            color=COLORS["text_muted"]
+                            if disabled
+                            else COLORS["text_secondary"],
+                        ),
+                        ft.Text(
+                            label,
+                            size=11,
+                            color=COLORS["text_muted"]
+                            if disabled
+                            else COLORS["text_secondary"],
+                        ),
+                    ],
+                    spacing=4,
+                    horizontal_alignment=ft.CrossAxisAlignment.CENTER,
+                    alignment=ft.MainAxisAlignment.CENTER,
+                ),
+                width=70,
+                height=56,
+                border_radius=8,
+                alignment=ft.alignment.center,
+                bgcolor="transparent",
+                on_click=None if disabled else on_click_fn,
+                on_hover=None if disabled else on_hover,
+                tooltip=tooltip,
+                opacity=0.5 if disabled else 1.0,
+            )
+
+        can_move_up = viewer.current_page > 0
+        can_move_down = viewer.current_page < document.page_count - 1
+        can_delete = document.page_count > 1
+
+        return [
+            ft.Container(width=24),  # Spacer
+            edit_btn(
+                ft.Icons.ROTATE_LEFT, "Rotate L", rotate_page_left, "Rotate 90° left"
+            ),
+            edit_btn(
+                ft.Icons.ROTATE_RIGHT, "Rotate R", rotate_page_right, "Rotate 90° right"
+            ),
+            ft.Container(
+                width=1,
+                height=40,
+                bgcolor=COLORS["border"],
+                margin=ft.margin.symmetric(horizontal=8),
+            ),
+            edit_btn(
+                ft.Icons.ADD, "Add Page", add_blank_page_after, "Add blank page after"
+            ),
+            edit_btn(
+                ft.Icons.CONTENT_COPY,
+                "Duplicate",
+                duplicate_current_page,
+                "Duplicate page",
+            ),
+            edit_btn(
+                ft.Icons.DELETE_OUTLINE,
+                "Delete",
+                delete_current_page,
+                "Delete page" if can_delete else "Cannot delete last page",
+                disabled=not can_delete,
+            ),
+            ft.Container(
+                width=1,
+                height=40,
+                bgcolor=COLORS["border"],
+                margin=ft.margin.symmetric(horizontal=8),
+            ),
+            edit_btn(
+                ft.Icons.ARROW_UPWARD,
+                "Move Up",
+                move_page_up,
+                "Move page earlier",
+                disabled=not can_move_up,
+            ),
+            edit_btn(
+                ft.Icons.ARROW_DOWNWARD,
+                "Move Down",
+                move_page_down,
+                "Move page later",
+                disabled=not can_move_down,
+            ),
+            ft.Container(expand=True),
+            # Close button
+            ft.Container(
+                content=ft.Icon(ft.Icons.CLOSE, size=16, color=COLORS["text_muted"]),
+                width=32,
+                height=32,
+                border_radius=6,
+                alignment=ft.alignment.center,
+                on_click=toggle_edit_menu,
+                tooltip="Close",
+            ),
+            ft.Container(width=24),  # Spacer
+        ]
+
+    edit_toolbar = ft.Container(
+        content=ft.Row(
+            build_edit_toolbar(),
+            ref=edit_toolbar_row_ref,
+            spacing=8,
+            vertical_alignment=ft.CrossAxisAlignment.CENTER,
+        ),
+        bgcolor=COLORS["surface"],
+        padding=ft.padding.symmetric(vertical=8),
+        border=ft.border.only(bottom=ft.BorderSide(1, COLORS["border"])),
+        visible=edit_menu_visible[0],
+        ref=edit_toolbar_ref,
+    )
+
+    def rebuild_edit_toolbar():
+        """Rebuild the edit toolbar."""
+        if edit_toolbar_ref.current:
+            edit_toolbar_ref.current.visible = edit_menu_visible[0]
+        if edit_toolbar_row_ref.current:
+            edit_toolbar_row_ref.current.controls = build_edit_toolbar()
+        if edit_toolbar_ref.current and edit_toolbar_ref.current.page:
+            edit_toolbar_ref.current.update()
+
     # ToC Sidebar
     toc_sidebar = ft.Container(
         ref=toc_sidebar_ref,
@@ -1618,7 +1861,7 @@ def main(page: ft.Page):
     # Layout
     page.add(
         ft.Column(
-            [toolbar, shapes_toolbar, main_content],
+            [toolbar, shapes_toolbar, edit_toolbar, main_content],
             spacing=0,
             expand=True,
         )
